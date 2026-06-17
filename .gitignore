@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+*.env.local
+*.env.production
+
+# Data — local only, not committed
+data/trading.db
+data/cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.mypy_cache/
+.pytest_cache/

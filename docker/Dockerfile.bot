@@ -1,0 +1,9 @@
+# Telegram Bot Service — PERSISTENT long-running process
+# Must not exit — uses restart: always in docker-compose.yml
+# Stub — flesh out at Checkpoint 6
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["python", "52WeekHigh/bot/bot.py"]
