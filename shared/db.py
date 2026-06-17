@@ -6,6 +6,7 @@ Uses the DB_PATH env var (default: ./data/trading.db relative to project root).
 Creates the DB and all tables on first use.
 """
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -41,3 +42,17 @@ def get_session() -> Session:
     if _SessionFactory is None:
         _SessionFactory = sessionmaker(bind=get_engine())
     return _SessionFactory()
+
+
+@contextmanager
+def session_scope():
+    """Context manager: commits on success, rolls back on exception, always closes."""
+    session = get_session()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
