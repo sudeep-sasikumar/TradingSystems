@@ -26,7 +26,6 @@ if str(_ROOT) not in sys.path:
 
 from shared.db import get_engine
 
-STRATEGY_VERSION = "52wh_v1_survivorship_10y"
 MIN_COUNT = 30   # cells below this are flagged — too few for reliable inference
 
 logger = logging.getLogger(__name__)
@@ -34,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
-def load_tagged_closed_trades() -> pd.DataFrame:
-    """Load closed trades joined with regime tags."""
+def load_tagged_closed_trades(strategy_version: str = "52wh_v1_survivorship_10y") -> pd.DataFrame:
+    """Load closed trades joined with regime tags for the given strategy version."""
     engine = get_engine()
     df = pd.read_sql(
         """
@@ -65,7 +64,7 @@ def load_tagged_closed_trades() -> pd.DataFrame:
         ORDER BY t.entry_date
         """,
         engine,
-        params={"sv": STRATEGY_VERSION},
+        params={"sv": strategy_version},
     )
     return df
 
@@ -156,10 +155,13 @@ def find_top_combinations(
 
 # ── Full analysis ──────────────────────────────────────────────────────────────
 
-def run_analysis() -> None:
-    df = load_tagged_closed_trades()
+def run_analysis(strategy_version: str = "52wh_v1_survivorship_10y") -> None:
+    df = load_tagged_closed_trades(strategy_version)
     if df.empty:
-        logger.error("No tagged closed trades found. Run: python run_regime_analysis.py --checkpoint tag")
+        logger.error(
+            f"No tagged closed trades found for strategy_version={strategy_version!r}. "
+            "Run: python run_regime_analysis.py --checkpoint tag --strategy-version <version>"
+        )
         return
 
     overall = _stats(df)

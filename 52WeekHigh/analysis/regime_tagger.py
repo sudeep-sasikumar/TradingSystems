@@ -35,16 +35,14 @@ from analysis.regime_data import (
 
 logger = logging.getLogger(__name__)
 
-STRATEGY_VERSION = "52wh_v1_survivorship_10y"
 
-
-def _load_trades(engine) -> pd.DataFrame:
+def _load_trades(engine, strategy_version: str) -> pd.DataFrame:
     return pd.read_sql(
         """SELECT id, ticker, entry_date FROM trades
            WHERE strategy_version = :sv AND source = 'backtest'
            ORDER BY entry_date""",
         engine,
-        params={"sv": STRATEGY_VERSION},
+        params={"sv": strategy_version},
     )
 
 
@@ -57,16 +55,20 @@ def _reverse_map(industry_stocks: dict[str, list[str]]) -> dict[str, str]:
     return mapping
 
 
-def tag_all_trades(force_refresh: bool = False) -> int:
+def tag_all_trades(
+    force_refresh: bool = False,
+    strategy_version: str = "52wh_v1_survivorship_10y",
+) -> int:
     """
-    Tag every historic backtest trade with market + sector regime signals.
+    Tag every backtest trade with market + sector regime signals.
+    strategy_version selects which set of trades to tag.
     Returns number of records written.
     """
     engine = get_engine()
     Base.metadata.create_all(engine)
 
     logger.info("=" * 60)
-    logger.info("Loading regime data...")
+    logger.info(f"Loading regime data for strategy_version={strategy_version!r} ...")
     logger.info("=" * 60)
 
     market_regime, market_ticker = load_market_regime(force_refresh)
@@ -79,14 +81,14 @@ def tag_all_trades(force_refresh: bool = False) -> int:
     logger.info(f"Sectoral indices available: {sorted(sectoral_regimes.keys())}")
     logger.info(f"Synthetic baskets built: {len(synthetic_baskets)}")
 
-    trades_df = _load_trades(engine)
+    trades_df = _load_trades(engine, strategy_version)
     logger.info(f"Tagging {len(trades_df):,} trades...")
 
     # Clear existing tags for this strategy version
     with session_scope() as s:
         deleted = s.execute(
             text("DELETE FROM trade_regime_tags WHERE strategy_version = :sv"),
-            {"sv": STRATEGY_VERSION},
+            {"sv": strategy_version},
         ).rowcount
         if deleted:
             logger.info(f"Cleared {deleted} existing regime tag rows.")
@@ -97,7 +99,7 @@ def tag_all_trades(force_refresh: bool = False) -> int:
 
     for _, row in trades_df.iterrows():
         trade_id   = int(row["id"])
-        ticker     = str(row["ticker"])          # e.g. "RELIANCE.NS"
+        ticker     = str(row["ticker"])
         entry_date = str(row["entry_date"])
 
         # Market regime
@@ -127,7 +129,7 @@ def tag_all_trades(force_refresh: bool = False) -> int:
             trade_id                  = trade_id,
             ticker                    = ticker,
             entry_date                = entry_date,
-            strategy_version          = STRATEGY_VERSION,
+            strategy_version          = strategy_version,
             market_index_used         = market_ticker,
             market_vs_200dma          = mkt["vs_200dma"],
             market_dist_200dma_pct    = mkt["dist_200dma_pct"],
