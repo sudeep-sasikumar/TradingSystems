@@ -15,9 +15,10 @@ build/
 .git/
 .gitignore
 
-# Data directory — mounted as a bind volume at runtime, not baked into image
-# (trading.db, nifty500.csv, daily cache parquet files)
-data/
+# Exclude runtime-generated data — do NOT exclude data/reconstitution_pdfs/
+# (those PDFs are committed reference data and must be bundled in the dashboard image)
+data/trading.db
+data/cache/
 
 # Dev-only scripts not needed in production images
 diag_corp_actions.py

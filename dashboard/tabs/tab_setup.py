@@ -203,7 +203,17 @@ def _db_status() -> None:
         st.success("All data populated — dashboard is fully operational.")
     else:
         missing = [k for k, ok in checks.items() if not ok]
-        st.warning(f"Missing data: {', '.join(missing)}. Run the steps below to populate.")
+        st.warning(f"Missing: {', '.join(missing)}.")
+
+    # Contextual next-step guidance
+    if n_orig > 500 and n_tags_orig == 0:
+        st.info(
+            "**Next step:** Run **Step 3 — Tag Regimes** below. "
+            "Your backtest data is present; regime tags are what the Regime Analysis tab "
+            "and live conviction tiers need. (~2–5 min per dataset)"
+        )
+    elif n_orig == 0:
+        st.info("**Fresh deployment:** Start with **Step 1** to run the original backtest.")
 
 
 def _run_step(label: str, cmd: list, timeout: int) -> bool:

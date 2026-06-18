@@ -46,9 +46,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── constants ─────────────────────────────────────────────────────────────────
-BASELINE_DATE   = date(2020, 7, 25)
-BASELINE_CSV    = _ROOT / "data" / "reconstitution_pdfs" / "nifty500_baseline_20200725.csv"
-RECON_PDF_DIR   = _ROOT / "data" / "reconstitution_pdfs"
+BASELINE_DATE = date(2020, 7, 25)
+
+# Primary path: local dev or bind-mount Docker deployment
+_RECON_PRIMARY = _ROOT / "data" / "reconstitution_pdfs"
+# Bundled path: Docker named-volume deployment — PDFs copied here in Dockerfile.dashboard
+# outside /app/data/ so they aren't masked by the named volume mount.
+_RECON_BUNDLED = Path("/app/reconstitution_pdfs_bundled")
+
+
+def _resolve_recon_dir() -> Path:
+    if _RECON_PRIMARY.exists() and any(_RECON_PRIMARY.glob("*.pdf")):
+        return _RECON_PRIMARY
+    if _RECON_BUNDLED.exists() and any(_RECON_BUNDLED.glob("*.pdf")):
+        logger.info("Using Docker-bundled PDFs at %s", _RECON_BUNDLED)
+        return _RECON_BUNDLED
+    raise FileNotFoundError(
+        f"Reconstitution PDFs not found in:\n"
+        f"  {_RECON_PRIMARY}\n"
+        f"  {_RECON_BUNDLED}\n"
+        "Ensure data/reconstitution_pdfs/ contains the PDF files."
+    )
+
+
+RECON_PDF_DIR = _resolve_recon_dir()
+BASELINE_CSV  = RECON_PDF_DIR / "nifty500_baseline_20200725.csv"
 
 # The first date for which we can reliably claim membership.
 # Stocks in the baseline but with no known add-event are assigned this date.

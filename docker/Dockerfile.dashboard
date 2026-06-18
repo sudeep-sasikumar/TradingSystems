@@ -10,6 +10,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Bundle reconstitution PDFs at a path outside /app/data/ so they survive the
+# named volume mount at /app/data/. build_membership.py falls back to this path
+# when data/reconstitution_pdfs/ is not accessible (i.e. masked by the volume).
+COPY data/reconstitution_pdfs /app/reconstitution_pdfs_bundled
+
 EXPOSE 8502
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \

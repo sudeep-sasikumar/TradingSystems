@@ -11,7 +11,7 @@ services:
       - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     restart: unless-stopped
     logging:
       driver: json-file
@@ -30,7 +30,7 @@ services:
       - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     restart: always
     logging:
       driver: json-file
@@ -46,7 +46,7 @@ services:
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     ports:
       - "${DASHBOARD_PORT:-8502}:8502"
     restart: unless-stopped
@@ -63,3 +63,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  trading_data:
