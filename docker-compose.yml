@@ -1,33 +1,49 @@
 services:
 
   scanner:
-    image: ghcr.io/sudeep-sasikumar/tradingsystems-scanner:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.scanner
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - CHAT_ID=${CHAT_ID}
       - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - trading_data:/app/data
+      - ./data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   bot:
-    image: ghcr.io/sudeep-sasikumar/tradingsystems-bot:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.bot
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - CHAT_ID=${CHAT_ID}
       - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - trading_data:/app/data
+      - ./data:/app/data
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   dashboard:
-    image: ghcr.io/sudeep-sasikumar/tradingsystems-dashboard:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - trading_data:/app/data
+      - ./data:/app/data
     ports:
       - "${DASHBOARD_PORT:-8502}:8502"
     restart: unless-stopped
@@ -39,6 +55,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-volumes:
-  trading_data:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -21,6 +21,7 @@ import streamlit as st
 from tabs.tab_52wh import render_tab as render_52wh
 from tabs.tab_52wh_historic import render_tab as render_52wh_historic
 from tabs.tab_regime import render_tab as render_regime
+from tabs.tab_setup import render_tab as render_setup
 
 st.set_page_config(
     page_title="TradingSystems Dashboard",
@@ -35,6 +36,7 @@ tabs = st.tabs([
     "52-Week High (Live)",
     "52-Week High (Historic, Survivorship-Corrected)",
     "Regime Analysis",
+    "Setup & Admin",
 ])
 
 with tabs[0]:
@@ -45,3 +47,6 @@ with tabs[1]:
 
 with tabs[2]:
     render_regime()
+
+with tabs[3]:
+    render_setup()
