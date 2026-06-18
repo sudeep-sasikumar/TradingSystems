@@ -20,6 +20,7 @@ sys.path.insert(0, str(_DASH))
 import streamlit as st
 from tabs.tab_52wh import render_tab as render_52wh
 from tabs.tab_52wh_historic import render_tab as render_52wh_historic
+from tabs.tab_regime import render_tab as render_regime
 
 st.set_page_config(
     page_title="TradingSystems Dashboard",
@@ -30,10 +31,17 @@ st.set_page_config(
 st.title("TradingSystems Dashboard")
 st.caption("Phase 1 — 52-Week High Momentum Strategy | NSE / Nifty 500")
 
-tabs = st.tabs(["52-Week High (Live)", "52-Week High (Historic, Survivorship-Corrected)"])
+tabs = st.tabs([
+    "52-Week High (Live)",
+    "52-Week High (Historic, Survivorship-Corrected)",
+    "Regime Analysis",
+])
 
 with tabs[0]:
     render_52wh()
 
 with tabs[1]:
     render_52wh_historic()
+
+with tabs[2]:
+    render_regime()

@@ -139,3 +139,53 @@ class IndexMembership(Base):
         UniqueConstraint("symbol", "added_date", name="uq_membership_symbol_added"),
         Index("ix_membership_symbol", "symbol"),
     )
+
+
+class TradeRegimeTag(Base):
+    """
+    Regime tags for every trade in the survivorship-corrected historic backtest.
+
+    All measures are point-in-time as of entry_date (no lookahead on the
+    time series). Quintile thresholds use the full history distribution
+    across the dataset (mild cross-sectional lookahead; requested by design).
+
+    Written by: 52WeekHigh/run_regime_analysis.py --checkpoint tag
+    Read by:    dashboard/tabs/tab_regime.py
+    """
+    __tablename__ = "trade_regime_tags"
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id         = Column(Integer, ForeignKey("trades.id"), nullable=False, unique=True)
+    ticker           = Column(String(20), nullable=False)
+    entry_date       = Column(String(10), nullable=False)
+    strategy_version = Column(String(20), nullable=False)
+
+    # Market regime (Nifty 500 index ^CRSLDX or synthetic fallback)
+    market_index_used       = Column(String(60))   # e.g. "^CRSLDX" or "synthetic_N_stocks"
+    market_vs_200dma        = Column(String(20))   # "above_200dma" | "below_200dma"
+    market_dist_200dma_pct  = Column(Float)        # % distance (+/-)
+    market_6m_return_pct    = Column(Float)        # raw 6-month trailing return %
+    market_6m_quintile      = Column(String(30))   # quintile label
+
+    # Official NSE sectoral index regime (null if no matching index for this stock)
+    official_sector         = Column(String(40))   # e.g. "NIFTY_PHARMA"
+    official_sector_ticker  = Column(String(20))   # Yahoo Finance ticker used
+    official_vs_200dma      = Column(String(20))
+    official_dist_200dma_pct = Column(Float)
+    official_6m_return_pct  = Column(Float)
+    official_6m_quintile    = Column(String(30))
+
+    # Synthetic equal-weighted industry basket (from baseline CSV Industry column)
+    industry_group           = Column(String(100)) # e.g. "PHARMA", "IT"
+    synthetic_basket_size    = Column(Integer)     # number of stocks in the basket
+    synthetic_vs_200dma      = Column(String(20))
+    synthetic_dist_200dma_pct = Column(Float)
+    synthetic_6m_return_pct  = Column(Float)
+    synthetic_6m_quintile    = Column(String(30))
+
+    created_at = Column(String(30), nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("ix_regime_tag_entry_date", "entry_date"),
+        Index("ix_regime_tag_strategy", "strategy_version"),
+    )

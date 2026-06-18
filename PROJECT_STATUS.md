@@ -214,9 +214,61 @@ Do NOT start until user confirms data quality is acceptable.
 
 ---
 
+### ✅ Checkpoint 8 — Regime Tagging and Analysis (complete)
+
+**Goal**: Tag every trade in the survivorship-corrected backtest with market + sector regime
+indicators as of its entry date; run cross-tab analysis to identify which regime environments
+produce the best 52-week-high momentum outcomes.
+
+**Files created/modified:**
+- `shared/models.py` — added `TradeRegimeTag` table (FK to trades.id; never modifies trade outcomes)
+- `52WeekHigh/analysis/__init__.py` — package marker
+- `52WeekHigh/analysis/regime_data.py` — download + cache index data; compute 200-DMA + 6M quintile
+- `52WeekHigh/analysis/regime_tagger.py` — tag all trades, write to trade_regime_tags
+- `52WeekHigh/analysis/regime_analysis.py` — cross-tab analysis, top/bottom combinations
+- `52WeekHigh/run_regime_analysis.py` — CLI: `--checkpoint tag|analyze|all`
+- `dashboard/tabs/tab_regime.py` — new "Regime Analysis" dashboard tab
+- `dashboard/app.py` — added third tab
+
+**Market index used**: `^CRSLDX` (Nifty 500 on Yahoo Finance, 2079 rows from 2018-01-01)
+**Sectoral indices** (all 10/10 available): Auto, Bank, IT, Pharma, FMCG, Metal, Realty, Media, Energy, PSU Bank
+**Synthetic baskets**: 14 equal-weighted industry baskets (from baseline CSV Industry col, ≥10 stocks)
+
+**Coverage (1,725 closed trades):**
+| Regime Layer | Coverage |
+|---|---|
+| Market (^CRSLDX) | 1,725 / 1,725 (100%) |
+| Official sector | 471 / 1,725 (27%) — 7 industries map to available NSE sectoral index |
+| Synthetic basket | 1,501 / 1,725 (87%) |
+
+**Key findings (data-only, no editorialising):**
+| Regime | Trades | Win% | Avg Ret% |
+|---|---|---|---|
+| Market BELOW 200-DMA | 188 | 60.6% | +35.93% |
+| Market ABOVE 200-DMA | 1,537 | 48.6% | +19.88% |
+| Market strong_downtrend (6M Q) | 191 | 64.9% | +44.04% |
+| Market flat (6M Q) | 254 | 33.9% | +12.42% |
+
+**Top pair (≥30 trades)**: `market_6m_quintile=strong_downtrend` + `official_vs_200dma=above_200dma` → 57 trades, 78.9% win, +73.31% avg return
+**Top triple**: `market_6m_quintile=strong_downtrend` + `official_vs_200dma=above_200dma` + `synthetic_vs_200dma=above_200dma` → 54 trades, 81.5% win, +75.84% avg return
+
+**To run:**
+```powershell
+# Tag all trades (downloads index data on first run, cached thereafter)
+venv\Scripts\python.exe 52WeekHigh\run_regime_analysis.py --checkpoint tag
+
+# Print full analysis tables to stdout
+venv\Scripts\python.exe 52WeekHigh\run_regime_analysis.py --checkpoint analyze
+
+# Force re-download of index data
+venv\Scripts\python.exe 52WeekHigh\run_regime_analysis.py --checkpoint tag --force-refresh
+```
+
+---
+
 ## Open Questions / Pending Decisions
 
-None — all design questions confirmed as of 2026-06-17.
+None — all design questions confirmed as of 2026-06-18.
 
 ---
 
