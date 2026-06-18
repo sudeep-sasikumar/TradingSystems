@@ -3,45 +3,27 @@ services:
   # ── Scanner ──────────────────────────────────────────────────────────────────
   # Long-running APScheduler process. Wakes hourly during NSE market hours
   # (9:15–15:30 IST), runs signal scan + EOD confirmation pass, then sleeps.
-  # Can restart on failure — no persistent connections or callbacks to lose.
   scanner:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.scanner
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-scanner:latest
     env_file: .env
     volumes:
       - ./data:/app/data
     restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   # ── Bot ───────────────────────────────────────────────────────────────────────
   # Persistent Telegram long-polling service. MUST remain running — if this
   # exits, in-flight Accept/Reject button callbacks are lost. restart: always.
   bot:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.bot
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-bot:latest
     env_file: .env
     volumes:
       - ./data:/app/data
     restart: always
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   # ── Dashboard ─────────────────────────────────────────────────────────────────
-  # Streamlit web server. Port exposed via DASHBOARD_PORT (.env), default 8502.
-  # Reads only from the shared SQLite DB — no direct dependency on scanner/bot.
+  # Streamlit web server on port 8502.
   dashboard:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.dashboard
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-dashboard:latest
     env_file: .env
     volumes:
       - ./data:/app/data
@@ -49,17 +31,8 @@ services:
       - "${DASHBOARD_PORT:-8502}:8502"
     restart: unless-stopped
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://localhost:8502/_stcore/health')"
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8502/_stcore/health')\""]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
