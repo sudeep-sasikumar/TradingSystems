@@ -174,6 +174,44 @@ docker compose logs -f scanner               # tail scanner logs
 
 ---
 
+---
+
+### 🔄 Checkpoint 7 — Survivorship-Corrected Historic Backtest (in progress)
+
+**Goal**: Run 52wk-high strategy over ~7-year window (Oct 2019 – present) using
+ACTUAL historical Nifty 500 membership, not today's list projected backward.
+Tagged `strategy_version = "52wh_v1_survivorship_10y"` per user spec.
+
+**Phase 2 — Membership table (code done; awaiting PDFs)**
+
+Files created:
+- `shared/models.py` — added `IndexMembership` table
+- `52WeekHigh/historic_universe/__init__.py`
+- `52WeekHigh/historic_universe/build_membership.py` — baseline CSV + PDF parser + reconstruction
+- `52WeekHigh/historic_universe/historic_engine.py` — extended backtest engine (time-varying universe)
+- `52WeekHigh/run_historic_backtest.py` — CLI entry point
+- `requirements.txt` — added `pdfplumber>=0.11.0`
+- `data/reconstitution_pdfs/nifty500_baseline_20200725.csv` — July 2020 Wayback Machine snapshot (501 stocks)
+
+**User must**: Download ~13 semi-annual reconstitution PDFs from
+https://niftyindices.com/announcements/reconstitution
+(all "Nifty 500" entries from Sep 2019 to present)
+Save as `*.pdf` files in `data/reconstitution_pdfs/`
+
+**Then run**:
+```powershell
+# Step 1 — build membership table
+venv\Scripts\python.exe 52WeekHigh\run_historic_backtest.py --checkpoint membership
+
+# Step 2 — extended backtest (~10-20 min, downloads 2018-present price history)
+venv\Scripts\python.exe 52WeekHigh\run_historic_backtest.py --checkpoint backtest
+```
+
+**Phase 3 — Dashboard (not started)**: Add new tab section showing year-by-year breakdown
+with constituent count, equity curve, and side-by-side comparison vs original 2022-2026 results.
+
+---
+
 ## Open Questions / Pending Decisions
 
 None — all design questions confirmed as of 2026-06-17.

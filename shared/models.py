@@ -6,7 +6,7 @@ filter by phase (e.g., "52wh_v1" for Phase 1).
 """
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Float, ForeignKey, UniqueConstraint
+    Column, Integer, String, Float, ForeignKey, UniqueConstraint, Index
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -96,3 +96,46 @@ class Trade(Base):
     updated_at = Column(String(30), nullable=False, default=_now)
 
     signal = relationship("Signal", back_populates="trade")
+
+
+class IndexMembership(Base):
+    """
+    Historical Nifty 500 membership — which stocks were constituents on which dates.
+
+    Reconstructed from:
+      - Baseline: data/reconstitution_pdfs/nifty500_baseline_20200725.csv
+        (Wayback Machine snapshot of NSE's ind_nifty500list.csv, captured 2020-07-25)
+      - Semi-annual reconstitution PDFs from niftyindices.com (~Sep 2019 → present)
+
+    Effective coverage: ~Oct 2019 to present (~7 years as of 2026).
+    Backtest tags this period as strategy_version='52wh_v1_survivorship_10y' per user spec.
+
+    Membership query:
+        SELECT * FROM index_membership
+        WHERE symbol = :symbol
+          AND added_date <= :date
+          AND (removed_date IS NULL OR removed_date >= :date)
+    """
+    __tablename__ = "index_membership"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    symbol       = Column(String(20), nullable=False)
+    company_name = Column(String(200))
+    isin         = Column(String(20))
+
+    # Dates stored as YYYY-MM-DD strings for consistency with the rest of the DB.
+    added_date   = Column(String(10), nullable=False)   # when stock joined the index
+    removed_date = Column(String(10))                   # when it left; NULL = still in
+
+    # 'exact'    — date taken directly from a reconstitution PDF
+    # 'inferred' — stock was in the Jul-2020 baseline but no add-event found in PDFs;
+    #              added_date is set to the first day of our coverage window
+    date_quality = Column(String(20), nullable=False, default="inferred")
+
+    source = Column(String(100))    # e.g. 'baseline_20200725', 'recon_202404'
+    notes  = Column(String(500))
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "added_date", name="uq_membership_symbol_added"),
+        Index("ix_membership_symbol", "symbol"),
+    )
