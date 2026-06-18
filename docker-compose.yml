@@ -1,38 +1,44 @@
 services:
 
-  # ── Scanner ──────────────────────────────────────────────────────────────────
-  # Long-running APScheduler process. Wakes hourly during NSE market hours
-  # (9:15–15:30 IST), runs signal scan + EOD confirmation pass, then sleeps.
   scanner:
     image: ghcr.io/sudeep-sasikumar/tradingsystems-scanner:latest
-    env_file: .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     restart: unless-stopped
 
-  # ── Bot ───────────────────────────────────────────────────────────────────────
-  # Persistent Telegram long-polling service. MUST remain running — if this
-  # exits, in-flight Accept/Reject button callbacks are lost. restart: always.
   bot:
     image: ghcr.io/sudeep-sasikumar/tradingsystems-bot:latest
-    env_file: .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     restart: always
 
-  # ── Dashboard ─────────────────────────────────────────────────────────────────
-  # Streamlit web server on port 8502.
   dashboard:
     image: ghcr.io/sudeep-sasikumar/tradingsystems-dashboard:latest
-    env_file: .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     ports:
       - "${DASHBOARD_PORT:-8502}:8502"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8502/_stcore/health')\""]
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8502/_stcore/health')"
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+volumes:
+  trading_data:
