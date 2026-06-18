@@ -60,16 +60,16 @@ COVERAGE_START  = date(2019, 10, 1)   # approx effective date of Sep-2019 recons
 # ════════════════════════════════════════════════════════════════════════════
 
 _DATE_PATTERNS = [
-    # "effective from 28th October, 2024"
+    # "effective from September 30, 2022"  ← niftyindices.com primary format
+    r"effective\s+from\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+    # "effective from 28th October, 2024"  ← day-first variant
     r"effective\s+(?:from|date)[:\s]+(\d{1,2}(?:st|nd|rd|th)?\s+\w+[,\s]+\d{4})",
     # "w.e.f. October 28, 2024"
-    r"w\.?e\.?f\.?\s+(\w+\s+\d{1,2}[,\s]+\d{4})",
+    r"w\.?e\.?f\.?\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})",
     # "effective 28/10/2024" or "28-10-2024"
     r"effective[:\s]+(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})",
-    # "Effective Date: October 28, 2024"
+    # "Effective Date: 28 October 2024"
     r"effective\s+date[:\s]+(\d{1,2}\s+\w+[,\s]+\d{4})",
-    # "October 2024" fallback (month+year only → assume 1st)
-    r"effective[^.]{0,40}(\w+\s+\d{4})",
 ]
 
 _MONTH_MAP = {
@@ -93,8 +93,8 @@ def _parse_date_string(s: str) -> date | None:
         except Exception:
             pass
 
-    # Try text formats: "28 October 2024" or "October 28 2024" or "October 2024"
-    parts = s.split()
+    # Try text formats: "28 October 2024" or "October 28, 2024" or "October 2024"
+    parts = [p for p in re.split(r"[\s,]+", s) if p]
     if len(parts) == 3:
         for day_i, mon_i, yr_i in [(0, 1, 2), (1, 0, 2)]:
             try:
@@ -129,134 +129,89 @@ def _extract_effective_date(full_text: str) -> date | None:
 
 
 def _looks_like_symbol(s: str) -> bool:
-    """NSE symbols: 2–20 uppercase letters/digits, sometimes & or - but not mostly."""
+    """NSE symbols: 2–20 uppercase letters/digits, sometimes & or - but no lowercase."""
     s = s.strip()
     return bool(re.match(r"^[A-Z0-9&\-\.]{2,20}$", s))
 
 
-def _is_header_or_junk(row: list) -> bool:
-    """Return True if a table row looks like a column header, not a data row."""
-    if not row:
-        return True
-    joined = " ".join(str(c) for c in row if c is not None).lower()
-    keywords = (
-        "company name", "s.no", "sr.no", "nse symbol", "symbol", "isin",
-        "name of", "series", "index name", "additions", "deletions",
-        "replacements", "entrants", "exits",
-    )
-    return any(k in joined for k in keywords)
-
-
-def _rows_to_stocks(rows: list[list]) -> list[dict]:
+def _extract_nifty500_section(full_text: str) -> str | None:
     """
-    Convert table rows to a list of {symbol, company_name} dicts.
-    Heuristic: find the column most likely to be the NSE symbol.
+    Return the text block for the 'Nifty 500' sub-section of a reconstitution PDF.
+    The PDFs cover many indices; we only want the Nifty 500 additions/removals.
+    Section headers use either number or letter prefixes: "3) Nifty 500" or "b) Nifty 500".
     """
-    stocks = []
-    for row in rows:
-        cells = [str(c).strip() if c is not None else "" for c in row]
-        cells = [c for c in cells if c and c not in ("None", "-", "")]
+    # Match "3) Nifty 500" or "b) Nifty 500" at the start of any line
+    m_start = re.search(r'(?:^|\n)[^\n]*?[a-zA-Z\d]+\s*\)\s*nifty\s+500\b', full_text, re.I)
+    if not m_start:
+        m_start = re.search(r'(?:^|\n)\s*nifty\s+500\b', full_text, re.I)
+    if not m_start:
+        return None
 
-        if _is_header_or_junk(cells):
+    rest = full_text[m_start.end():]
+
+    # Find the next index section header (number or letter prefix + ) + Nifty)
+    m_end = re.search(r'\n\s*[a-zA-Z\d]+\s*\)\s*(?:Nifty|NIFTY)', rest, re.I)
+    if m_end:
+        return full_text[m_start.start(): m_start.end() + m_end.start()]
+    return full_text[m_start.start():]
+
+
+def _parse_nifty500_section(section_text: str) -> tuple[list[dict], list[dict]]:
+    """
+    Parse additions and removals from the Nifty 500 text block.
+
+    Each stock line is:  "<serial_no> <Company Name> <SYMBOL>"
+    "being excluded" lines switch current list to removals;
+    "being included" lines switch to additions.
+    """
+    additions: list[dict] = []
+    removals:  list[dict] = []
+    current:   list[dict] | None = None
+
+    for line in section_text.splitlines():
+        stripped = line.strip()
+        low = stripped.lower()
+
+        if not stripped:
             continue
 
-        symbol = None
-        company = None
-
-        # Look for a cell that looks like an NSE symbol
-        for i, cell in enumerate(cells):
-            if _looks_like_symbol(cell) and not cell.isdigit():
-                # Skip pure-digit serial numbers like "1", "10"
-                symbol = cell
-                # The company name is likely an adjacent longer cell
-                for j, other in enumerate(cells):
-                    if j != i and len(other) > 5 and not _looks_like_symbol(other):
-                        company = other
-                        break
-                break
-
-        if symbol:
-            stocks.append({"symbol": symbol, "company_name": company or ""})
-
-    return stocks
-
-
-def _split_additions_removals(
-    tables: list, full_text: str
-) -> tuple[list[dict], list[dict]]:
-    """
-    Given all extracted pdfplumber tables and the full page text,
-    return (additions, removals) as lists of {symbol, company_name}.
-
-    Strategy:
-    - Split page text at the word "deletion"/"removal"/"exit" to find the section boundary.
-    - Tables appearing before the boundary → additions; after → removals.
-    - Fallback: use table order (first = additions, second = removals).
-    """
-    # Find approximate character position of the removal section heading
-    split_pos = None
-    for kw in ("deletion", "removal", "exit", "replacement"):
-        m = re.search(kw, full_text.lower())
-        if m:
-            split_pos = m.start()
-            break
-
-    if split_pos is None:
-        # Simple fallback: first table = additions, second = removals
-        if len(tables) >= 2:
-            return _rows_to_stocks(tables[0]), _rows_to_stocks(tables[1])
-        elif len(tables) == 1:
-            return _rows_to_stocks(tables[0]), []
-        return [], []
-
-    addition_rows, removal_rows = [], []
-    for tbl in tables:
-        if not tbl:
-            continue
-        # pdfplumber tables carry position; we can't easily tell which section
-        # they're in without bbox. Use heuristic: if the table has any header
-        # mentioning "addition" or "entrant" → additions table.
-        header_text = " ".join(
-            str(c) for c in (tbl[0] if tbl else []) if c
-        ).lower()
-        if any(k in header_text for k in ("addition", "entrant", "new", "inclus")):
-            addition_rows.extend(tbl[1:])
-        elif any(k in header_text for k in ("deletion", "removal", "exit", "exclus", "replac")):
-            removal_rows.extend(tbl[1:])
-        else:
-            # No conclusive header — assign by position in full_text
-            # Use a simple count heuristic: tables before midpoint → additions
-            addition_rows.extend(tbl[1:])   # safe default; might be wrong
-
-    # If we couldn't split cleanly, try full-text line parse as fallback
-    if not addition_rows and not removal_rows:
-        return _parse_text_fallback(full_text)
-
-    return _rows_to_stocks(addition_rows), _rows_to_stocks(removal_rows)
-
-
-def _parse_text_fallback(text: str) -> tuple[list[dict], list[dict]]:
-    """
-    Last-resort text parser: look for NSE-symbol-like tokens in each section.
-    Returns (additions, removals).
-    """
-    lines = text.splitlines()
-    additions, removals = [], []
-    current = None
-
-    for line in lines:
-        low = line.lower()
-        if any(k in low for k in ("addition", "entrant", "new entrant", "inclus")):
-            current = additions
-        elif any(k in low for k in ("deletion", "removal", "exit", "exclus")):
+        if re.search(r'being\s+excluded|being\s+deleted|being\s+removed', low):
             current = removals
-        elif current is not None:
-            # Try to extract a symbol from this line
-            tokens = line.strip().split()
-            for tok in tokens:
-                if _looks_like_symbol(tok) and not tok.isdigit():
-                    current.append({"symbol": tok, "company_name": line.strip()})
-                    break
+            continue
+        if re.search(r'being\s+included|being\s+added', low):
+            current = additions
+            continue
+
+        if current is None:
+            continue
+
+        # Skip header rows and boilerplate
+        if re.search(
+            r'sr\.?\s*no|company\s+name|nse\s*symbol|^symbol$'
+            r'|above\s+replacement|also\s+applicable|press\s+release|nse\s+indices',
+            low
+        ):
+            continue
+
+        tokens = stripped.split()
+        # Stock lines start with a serial number
+        if len(tokens) < 3 or not re.match(r'^\d+$', tokens[0]):
+            continue
+
+        # Symbol = rightmost token that looks like an NSE symbol (all-uppercase)
+        symbol = None
+        for tok in reversed(tokens[1:]):
+            if _looks_like_symbol(tok) and not tok.isdigit():
+                symbol = tok
+                break
+        if not symbol:
+            continue
+
+        # Company name = everything between serial number and symbol
+        sym_pos = stripped.rfind(symbol)
+        company = stripped[len(tokens[0]):sym_pos].strip()
+
+        current.append({"symbol": symbol, "company_name": company})
 
     return additions, removals
 
@@ -271,7 +226,7 @@ def parse_reconstitution_pdf(pdf_path: Path) -> dict | None:
           "additions":  [{"symbol": ..., "company_name": ...}, ...],
           "removals":   [{"symbol": ..., "company_name": ...}, ...],
           "source":     str,
-          "warnings":   [str],   # non-fatal issues found during parsing
+          "warnings":   [str],
         }
     or None if the file cannot be parsed at all.
     """
@@ -281,24 +236,15 @@ def parse_reconstitution_pdf(pdf_path: Path) -> dict | None:
         logger.error("pdfplumber not installed. Run: pip install pdfplumber")
         return None
 
-    warnings: list[str] = []
-
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            full_text = "\n".join(
-                (page.extract_text() or "") for page in pdf.pages
-            )
-            all_tables = []
-            for page in pdf.pages:
-                tbls = page.extract_tables() or []
-                all_tables.extend(tbls)
+            full_text = "\n".join((page.extract_text() or "") for page in pdf.pages)
     except Exception as exc:
         logger.error(f"Cannot open PDF {pdf_path.name}: {exc}")
         return None
 
     if not full_text.strip():
         logger.warning(f"{pdf_path.name}: no text extracted — may be a scanned PDF")
-        warnings.append("no extractable text; file may be scanned/image-only")
         return None
 
     effective_date = _extract_effective_date(full_text)
@@ -309,16 +255,21 @@ def parse_reconstitution_pdf(pdf_path: Path) -> dict | None:
         )
         return None
 
-    additions, removals = _split_additions_removals(all_tables, full_text)
+    warnings: list[str] = []
+    nifty500_text = _extract_nifty500_section(full_text)
+    if nifty500_text:
+        additions, removals = _parse_nifty500_section(nifty500_text)
+    else:
+        logger.warning(f"{pdf_path.name}: Nifty 500 section not found.")
+        warnings.append("Nifty 500 section not found in PDF text")
+        additions, removals = [], []
 
-    # De-duplicate by symbol
     def dedup(lst):
-        seen = set()
+        seen: set[str] = set()
         out = []
         for item in lst:
-            sym = item["symbol"]
-            if sym not in seen:
-                seen.add(sym)
+            if item["symbol"] not in seen:
+                seen.add(item["symbol"])
                 out.append(item)
         return out
 
