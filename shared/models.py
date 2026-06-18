@@ -156,6 +156,41 @@ class IndexMembership(Base):
     )
 
 
+class Sp500Membership(Base):
+    """
+    Historical S&P 500 membership — time-varying constituent list.
+
+    Source: fja05680/sp500 (GitHub), derived from S&P announcements via Wikipedia.
+    Coverage: ~1996 to present. Backtest uses from COVERAGE_START = 2006-01-01.
+
+    Membership query:
+        SELECT * FROM sp500_membership
+        WHERE ticker = :ticker
+          AND added_date <= :date
+          AND (removed_date IS NULL OR removed_date > :date)
+    """
+    __tablename__ = "sp500_membership"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    ticker       = Column(String(20), nullable=False)
+    company_name = Column(String(200))
+
+    added_date   = Column(String(10), nullable=False)   # YYYY-MM-DD
+    removed_date = Column(String(10))                   # NULL = still in index
+
+    # 'confirmed' — date taken from Wikipedia-sourced change record
+    # 'baseline'  — ticker was in the 1996-03-25 baseline; actual add date unknown
+    date_quality = Column(String(20), nullable=False, default="confirmed")
+
+    source = Column(String(100))
+    notes  = Column(String(500))
+
+    __table_args__ = (
+        Index("ix_sp500_membership_ticker", "ticker"),
+        Index("ix_sp500_membership_dates",  "added_date", "removed_date"),
+    )
+
+
 class TradeRegimeTag(Base):
     """
     Regime tags for every trade in the survivorship-corrected historic backtest.

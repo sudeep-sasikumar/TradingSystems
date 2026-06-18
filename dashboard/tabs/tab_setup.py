@@ -19,10 +19,11 @@ sys.path.insert(0, str(_ROOT))
 
 from shared.db import get_engine
 
-_PY          = sys.executable
-_RUN_BACKTEST = str(_ROOT / "52WeekHigh" / "run_backtest.py")
-_RUN_HISTORIC = str(_ROOT / "52WeekHigh" / "run_historic_backtest.py")
-_RUN_REGIME   = str(_ROOT / "52WeekHigh" / "run_regime_analysis.py")
+_PY             = sys.executable
+_RUN_BACKTEST   = str(_ROOT / "52WeekHigh" / "run_backtest.py")
+_RUN_HISTORIC   = str(_ROOT / "52WeekHigh" / "run_historic_backtest.py")
+_RUN_REGIME     = str(_ROOT / "52WeekHigh" / "run_regime_analysis.py")
+_RUN_SP500      = str(_ROOT / "SP500" / "run_sp500_backtest.py")
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
@@ -104,10 +105,50 @@ def render_tab() -> None:
 
     st.divider()
 
+    # ── Step 4 — SP500 membership ──────────────────────────────────────────────
+    st.subheader("Step 4 — S&P 500 Historical Membership (CP-S2)")
+    st.markdown(
+        "Downloads the fja05680/sp500 CSV from GitHub (Wikipedia-sourced constituent "
+        "changes since 1996) and populates the `sp500_membership` table.  \n"
+        "**Est. runtime:** < 1 min  \n"
+        "Required before Step 5."
+    )
+    if st.button("▶  Build S&P 500 Membership Table", key="btn_sp500_member"):
+        _run_step(
+            label="S&P 500 Membership (CP-S2)",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "membership"],
+            timeout=120,
+        )
+        st.info("Done — click **Refresh Status** to see updated membership row count.")
+
+    st.divider()
+
+    # ── Step 5 — SP500 backtest ────────────────────────────────────────────────
+    st.subheader("Step 5 — S&P 500 Backtest, 2006–present (CP-S3)")
+    st.markdown(
+        "Downloads adjusted daily close for all ~900 historical S&P 500 members "
+        "(price data from 2005-01-01 for 252-day warm-up), runs the 52-week-high "
+        "strategy with time-varying membership and explicit delisting handling, "
+        "and saves results as `strategy_version=sp500_52wh_v1`.  \n"
+        "**strategy\\_version:** `sp500_52wh_v1` &nbsp;|&nbsp; "
+        "**Est. runtime:** 45–90 min on first run  \n"
+        "⚠️  Keep this browser tab open — the process runs synchronously."
+    )
+    if st.button("▶  Run S&P 500 Backtest", key="btn_sp500_backtest"):
+        _run_step(
+            label="S&P 500 Backtest 2006-present (CP-S3)",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "backtest"],
+            timeout=9000,
+        )
+        st.info("Done — click **Refresh Status** to see updated trade counts.")
+
+    st.divider()
+
     # ── Run All ────────────────────────────────────────────────────────────────
-    st.subheader("Run All Steps (1 → 2 → 3)")
+    st.subheader("Run All Steps (1 → 2 → 3 → 4 → 5)")
     st.warning(
-        "Runs all steps sequentially. **Total runtime: 30–60 min** on first run (price downloads). "
+        "Runs all Nifty + S&P 500 steps sequentially. **Total runtime: 90–150 min** "
+        "on first run (price downloads for both universes). "
         "Do not close this browser tab. If you prefer, SSH into the VPS and use the CLI "
         "commands in the Advanced section below instead."
     )
@@ -144,6 +185,19 @@ def render_tab() -> None:
                  "--strategy-version", "52wh_v1_survivorship_10y"],
             timeout=600,
         )
+        st.markdown("**Step 4 — S&P 500 Membership**")
+        sp500_ok = _run_step(
+            label="S&P 500 Membership (CP-S2)",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "membership"],
+            timeout=120,
+        )
+        st.markdown("**Step 5 — S&P 500 Backtest**")
+        if sp500_ok:
+            _run_step(
+                label="S&P 500 Backtest 2006-present (CP-S3)",
+                cmd=[_PY, _RUN_SP500, "--checkpoint", "backtest"],
+                timeout=9000,
+            )
         st.success("All steps complete — click **Refresh Status** at the top to verify.")
 
     st.divider()
@@ -181,28 +235,42 @@ def _db_status() -> None:
         "JOIN trades t ON trt.trade_id = t.id "
         "WHERE t.strategy_version = '52wh_v1_survivorship_10y'"
     )
-    n_live       = _q("SELECT COUNT(*) FROM trades WHERE source='live'")
-    n_membership = _q("SELECT COUNT(*) FROM index_membership")
+    n_live         = _q("SELECT COUNT(*) FROM trades WHERE source='live'")
+    n_membership   = _q("SELECT COUNT(*) FROM index_membership")
+    n_sp500_member = _q("SELECT COUNT(*) FROM sp500_membership")
+    n_sp500_trades = _q("SELECT COUNT(*) FROM trades WHERE strategy_version='sp500_52wh_v1' AND source='backtest'")
 
+    st.markdown("**Nifty 500 (India)**")
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Original Backtest",   f"{n_orig:,}",       help="strategy_version=52wh_v1, source=backtest")
     c2.metric("Historic Backtest",   f"{n_hist:,}",       help="strategy_version=52wh_v1_survivorship_10y")
     c3.metric("Regime Tags (Orig)",  f"{n_tags_orig:,}")
     c4.metric("Regime Tags (Hist)",  f"{n_tags_hist:,}")
     c5.metric("Live Trades",         f"{n_live:,}")
-    c6.metric("Membership Rows",     f"{n_membership:,}", help="Point-in-time Nifty 500 membership intervals")
+    c6.metric("Nifty Membership",    f"{n_membership:,}", help="Point-in-time Nifty 500 membership intervals")
 
-    checks = {
-        "Original backtest data":   n_orig > 500,
-        "Historic backtest data":   n_hist > 500,
-        "Membership table":         n_membership > 0,
-        "Regime tags (original)":   n_tags_orig > 500,
-        "Regime tags (historic)":   n_tags_hist > 500,
+    st.markdown("**S&P 500 (US)**")
+    d1, d2 = st.columns(2)
+    d1.metric("SP500 Membership Rows",  f"{n_sp500_member:,}", help="Historical constituent intervals (sp500_membership)")
+    d2.metric("SP500 Backtest Trades",  f"{n_sp500_trades:,}", help="strategy_version=sp500_52wh_v1, source=backtest")
+
+    nifty_checks = {
+        "Nifty original backtest":  n_orig > 500,
+        "Nifty historic backtest":  n_hist > 500,
+        "Nifty membership table":   n_membership > 0,
+        "Nifty regime tags (orig)": n_tags_orig > 500,
+        "Nifty regime tags (hist)": n_tags_hist > 500,
     }
-    if all(checks.values()):
+    sp500_checks = {
+        "S&P 500 membership table": n_sp500_member > 400,
+        "S&P 500 backtest trades":  n_sp500_trades > 500,
+    }
+    all_checks = {**nifty_checks, **sp500_checks}
+
+    if all(all_checks.values()):
         st.success("All data populated — dashboard is fully operational.")
     else:
-        missing = [k for k, ok in checks.items() if not ok]
+        missing = [k for k, ok in all_checks.items() if not ok]
         st.warning(f"Missing: {', '.join(missing)}.")
 
     # Contextual next-step guidance
@@ -264,16 +332,22 @@ def _advanced_section() -> None:
 **Preferred approach for first-time VPS setup (run inside the container):**
 
 ```bash
-# Step 1: original backtest
+# Step 1: original Nifty backtest
 docker compose exec dashboard python 52WeekHigh/run_backtest.py --checkpoint backtest
 
-# Step 2: historic backtest
+# Step 2: Nifty historic backtest
 docker compose exec dashboard python 52WeekHigh/run_historic_backtest.py --checkpoint membership
 docker compose exec dashboard python 52WeekHigh/run_historic_backtest.py --checkpoint backtest
 
 # Step 3: regime tags
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint tag --strategy-version 52wh_v1
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint tag --strategy-version 52wh_v1_survivorship_10y
+
+# Step 4: S&P 500 membership table
+docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint membership
+
+# Step 5: S&P 500 backtest (45-90 min, ~900 tickers x 20 years of prices)
+docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint backtest
 ```
 
 **Force re-download all price data (clears cache):**
@@ -283,6 +357,8 @@ docker compose exec dashboard python 52WeekHigh/run_backtest.py --checkpoint bac
 docker compose exec dashboard python 52WeekHigh/run_historic_backtest.py --checkpoint backtest --force-refresh
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint tag --strategy-version 52wh_v1 --force-refresh
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint tag --strategy-version 52wh_v1_survivorship_10y --force-refresh
+docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint membership --force-refresh
+docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint backtest --force-refresh
 ```
 
 **Deploy latest code after `git pull`:**
