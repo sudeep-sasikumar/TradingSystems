@@ -211,10 +211,30 @@ def render_tab() -> None:
 
     if closed.empty:
         st.warning(
-            "**Backtest not yet run.** Execute:\n\n"
-            "```\nvenv\\Scripts\\python.exe 52WeekHigh\\run_backtest.py "
-            "--checkpoint backtest\n```"
+            "**Backtest has not been run on this server yet.** "
+            "Click the button below to download Nifty 500 data and run the full backtest. "
+            "This takes approximately 5–10 minutes."
         )
+        if st.button("Run Backtest Now", type="primary", icon="▶"):
+            import subprocess
+            with st.spinner(
+                "Running backtest — downloading ~500 tickers and computing signals... "
+                "please wait (5–10 min)"
+            ):
+                result = subprocess.run(
+                    [sys.executable,
+                     str(_ROOT / "52WeekHigh" / "run_backtest.py"),
+                     "--checkpoint", "backtest"],
+                    capture_output=True, text=True, cwd=str(_ROOT),
+                    timeout=1800,
+                )
+            if result.returncode == 0:
+                st.success("Backtest complete! Loading results...")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("Backtest failed. See details below.")
+                st.code((result.stderr or result.stdout)[-3000:])
         return
 
     st.warning(
@@ -387,11 +407,6 @@ All other large moves in the backtest are confirmed genuine market events
     # LIVE TRADING TAB
     # ═════════════════════════════════════════════════════════════════════════
     with live_tab:
-        st.info(
-            "Live trading sections are populated after Checkpoint 4 (scanner) "
-            "and Checkpoint 5 (Telegram bot) are complete."
-        )
-
         live_df, pending_df = _load_live()
 
         # SECTION 5 — Open positions
