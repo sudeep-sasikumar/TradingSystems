@@ -166,10 +166,10 @@ docker compose ps           # verify all three services running
 # Then open http://<VPS_IP>:8502 → Setup & Admin tab → Run All Steps
 ```
 
-**Day-to-day (deploy latest code)**:
+**Day-to-day (deploy latest code after CI builds new images)**:
 ```bash
-git pull
-docker compose up --build -d
+docker compose pull
+docker compose up -d
 docker compose ps
 ```
 
@@ -349,10 +349,17 @@ masked committed PDF files inside containers.
 - `dashboard/app.py`: added "Setup & Admin" as 4th tab
 - `52WeekHigh/analysis/capital_simulation.py`: committed (was untracked)
 
-**VPS update command** (after this commit is on master):
+**VPS update command** (after CI finishes building new images):
 ```bash
-git pull && docker compose up --build -d
-# Then: open http://<VPS_IP>:8502 → Setup & Admin tab → Run All Steps
+docker compose pull && docker compose up -d
+# Then: open http://<VPS_IP>:8502 → Setup & Admin tab → Run All Steps (if fresh VPS)
+```
+
+**Volume note**: docker-compose.yml now uses `./data:/app/data` bind mount instead of the
+prior named volume `trading_data`. This makes committed PDFs/baseline CSV accessible inside
+containers. If VPS had data in the named volume, migrate with:
+```bash
+docker run --rm -v trading_data:/from -v $(pwd)/data:/to alpine sh -c "cp -r /from/. /to/"
 ```
 
 ---

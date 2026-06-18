@@ -1,6 +1,7 @@
 services:
 
   scanner:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-scanner:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.scanner
@@ -19,6 +20,7 @@ services:
         max-file: "3"
 
   bot:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-bot:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.bot
@@ -37,6 +39,7 @@ services:
         max-file: "3"
 
   dashboard:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-dashboard:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.dashboard
