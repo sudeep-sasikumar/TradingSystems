@@ -86,13 +86,16 @@ _UTC              = timezone.utc
 
 def _migrate_db() -> None:
     """
-    Add bot-tracking columns to existing tables.
-    ALTER TABLE ADD COLUMN is idempotent in SQLite — errors are silently swallowed.
+    Add tracking columns to existing tables.
+    ALTER TABLE ADD COLUMN is idempotent in SQLite -- errors are silently swallowed.
     """
     engine = get_engine()
     stmts = [
         "ALTER TABLE signals ADD COLUMN eod_notified INTEGER DEFAULT 0",
         "ALTER TABLE trades  ADD COLUMN exit_notified INTEGER DEFAULT 0",
+        # Checkpoint 8b: conviction tier stored at signal creation time
+        "ALTER TABLE signals ADD COLUMN conviction_tier TEXT",
+        "ALTER TABLE signals ADD COLUMN regime_score INTEGER",
     ]
     with engine.connect() as conn:
         for stmt in stmts:
@@ -118,6 +121,36 @@ def _esc(value) -> str:
 #  MESSAGE FORMATTERS
 # ════════════════════════════════════════════════════════════════════════════
 
+def _fmt_conviction(row: pd.Series) -> str:
+    """
+    Return MarkdownV2 string for the conviction tier line.
+    Returns empty string for old signals with no tier data.
+
+    Tier rules (Checkpoint 8b):
+      HIGH     : market 6M bottom-2 quintiles AND sector basket above 200-DMA
+      AVOID    : market 6M strong_uptrend quintile
+      STANDARD : everything else
+    Advisory only -- never blocks the signal; user makes final call.
+    """
+    tier = row.get("conviction_tier")
+    if not tier:
+        return ""
+
+    if tier == "HIGH":
+        return (
+            "\nConviction: *HIGH CONVICTION*\n"
+            "_\\[Regime score >=2 \\- historically avg \\+40\\-60% in this environment\\]_"
+        )
+    if tier == "AVOID":
+        return (
+            "\n⚠ Conviction: *AVOID*\n"
+            "_\\[Market in strong uptrend \\- historically weakest entry "
+            "\\(avg \\+9% vs \\+27% baseline\\)\\. Take with caution\\.\\]_"
+        )
+    # STANDARD
+    return "\nConviction: STANDARD"
+
+
 def _fmt_signal(row: pd.Series) -> str:
     ticker   = _esc(row["ticker"])
     company  = _esc(row.get("company_name", ""))
@@ -140,12 +173,15 @@ def _fmt_signal(row: pd.Series) -> str:
         else ""
     )
 
+    conviction_note = _fmt_conviction(row)
+
     return (
         f"*52\\-Week High Signal*\n\n"
         f"*{ticker}* — {company}\n"
         f"Signal price: ₹{_esc(f'{price:.2f}')} — _actual fill price may differ\\._\n"
         f"Above 252\\-day high: ₹{_esc(f'{bm:.2f}')} \\(\\+{_esc(f'{pct:.2f}')}%\\)\n"
-        f"Type: {type_lbl}\n\n"
+        f"Type: {type_lbl}"
+        f"{conviction_note}\n\n"
         f"_Detected: {_esc(ts)} UTC_"
         f"{cap_note}"
     )

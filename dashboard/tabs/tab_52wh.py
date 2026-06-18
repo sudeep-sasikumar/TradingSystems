@@ -61,11 +61,22 @@ def _load_backtest() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 @st.cache_data(ttl=60)
 def _load_live() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Returns (live_trades_df, pending_signals_df). Gracefully returns empty on failure."""
+    """
+    Returns (live_trades_df, pending_signals_df).
+    live_trades_df includes conviction_tier / regime_score via LEFT JOIN to signals.
+    """
     engine = get_engine()
     try:
         live = pd.read_sql(
-            "SELECT * FROM trades WHERE source='live' ORDER BY entry_date DESC",
+            """
+            SELECT t.*,
+                   s.conviction_tier,
+                   s.regime_score
+            FROM trades t
+            LEFT JOIN signals s ON t.signal_id = s.id
+            WHERE t.source = 'live'
+            ORDER BY t.entry_date DESC
+            """,
             engine,
         )
         sigs = pd.read_sql(
@@ -75,6 +86,26 @@ def _load_live() -> tuple[pd.DataFrame, pd.DataFrame]:
         return live, sigs
     except Exception:
         return pd.DataFrame(), pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def _load_conviction_tally() -> pd.DataFrame:
+    """Signals by tier x status, for the running acceptance tally."""
+    engine = get_engine()
+    try:
+        return pd.read_sql(
+            """
+            SELECT conviction_tier, status, COUNT(*) AS n
+            FROM signals
+            WHERE strategy_version = '52wh_v1'
+              AND conviction_tier IS NOT NULL
+            GROUP BY conviction_tier, status
+            ORDER BY conviction_tier, status
+            """,
+            engine,
+        )
+    except Exception:
+        return pd.DataFrame()
 
 
 # ── Computation helpers ────────────────────────────────────────────────────────
@@ -408,13 +439,44 @@ All other large moves in the backtest are confirmed genuine market events
     # ═════════════════════════════════════════════════════════════════════════
     with live_tab:
         live_df, pending_df = _load_live()
+        tally_df = _load_conviction_tally()
 
-        # SECTION 5 — Open positions
+        # ── SECTION 5 — Open positions ────────────────────────────────────────
         st.subheader("Open Positions")
         if not live_df.empty:
-            open_live = live_df[live_df["status"] == "open"]
+            open_live = live_df[live_df["status"] == "open"].copy()
             if not open_live.empty:
-                st.dataframe(open_live, hide_index=True, use_container_width=True)
+                open_cols = [
+                    "ticker", "company_name", "entry_date",
+                    "entry_price", "highest_price_reached", "trailing_stop",
+                    "conviction_tier", "regime_score",
+                ]
+                open_disp = open_live[[c for c in open_cols if c in open_live.columns]]
+                _tier_note = {
+                    "HIGH":     "HIGH CONVICTION",
+                    "STANDARD": "Standard",
+                    "AVOID":    "AVOID ⚠",
+                }
+                if "conviction_tier" in open_disp.columns:
+                    open_disp = open_disp.copy()
+                    open_disp["conviction_tier"] = open_disp["conviction_tier"].map(
+                        lambda x: _tier_note.get(x, x or "—")
+                    )
+                st.dataframe(
+                    open_disp,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "ticker":                 st.column_config.TextColumn("Ticker"),
+                        "company_name":           st.column_config.TextColumn("Company"),
+                        "entry_date":             st.column_config.DateColumn("Entry", format="YYYY-MM-DD"),
+                        "entry_price":            st.column_config.NumberColumn("Entry Rs.", format="%.2f"),
+                        "highest_price_reached":  st.column_config.NumberColumn("Peak Rs.", format="%.2f"),
+                        "trailing_stop":          st.column_config.NumberColumn("Stop Rs.", format="%.2f"),
+                        "conviction_tier":        st.column_config.TextColumn("Conviction", width=160),
+                        "regime_score":           st.column_config.NumberColumn("Score", format="%d"),
+                    },
+                )
             else:
                 st.caption("No open live positions.")
         else:
@@ -422,16 +484,91 @@ All other large moves in the backtest are confirmed genuine market events
 
         st.divider()
 
-        # SECTION 6 — Pending signals
+        # ── SECTION 6 — Pending signals ───────────────────────────────────────
         st.subheader("Pending Signals (awaiting Accept / Reject)")
         if not pending_df.empty:
-            st.dataframe(pending_df, hide_index=True, use_container_width=True)
+            sig_cols = [
+                "ticker", "company_name", "signal_date", "signal_price",
+                "benchmark_252d", "signal_type", "conviction_tier", "regime_score",
+                "scan_timestamp",
+            ]
+            sig_disp = pending_df[[c for c in sig_cols if c in pending_df.columns]].copy()
+            if "conviction_tier" in sig_disp.columns:
+                _tier_note = {"HIGH": "HIGH CONVICTION", "STANDARD": "Standard", "AVOID": "AVOID ⚠"}
+                sig_disp["conviction_tier"] = sig_disp["conviction_tier"].map(
+                    lambda x: _tier_note.get(x, x or "—")
+                )
+            st.dataframe(
+                sig_disp,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "ticker":          st.column_config.TextColumn("Ticker"),
+                    "company_name":    st.column_config.TextColumn("Company"),
+                    "signal_date":     st.column_config.TextColumn("Date"),
+                    "signal_price":    st.column_config.NumberColumn("Signal Rs.", format="%.2f"),
+                    "benchmark_252d":  st.column_config.NumberColumn("252d High", format="%.2f"),
+                    "signal_type":     st.column_config.TextColumn("Type"),
+                    "conviction_tier": st.column_config.TextColumn("Conviction", width=160),
+                    "regime_score":    st.column_config.NumberColumn("Score", format="%d"),
+                    "scan_timestamp":  st.column_config.TextColumn("Scanned"),
+                },
+            )
         else:
             st.caption("No pending signals.")
 
         st.divider()
 
-        # SECTION 7 — Recent activity
+        # ── SECTION 7 — Conviction Tier Tally ────────────────────────────────
+        st.subheader("Conviction Tier — Running Tally")
+        st.caption(
+            "Signals generated since Checkpoint 8b (conviction tier tracking). "
+            "Your historical accept/reject pattern per tier."
+        )
+        if tally_df.empty:
+            st.info(
+                "No conviction-tagged signals yet. "
+                "Conviction tiers are recorded on new signals generated by the live scanner."
+            )
+        else:
+            # Pivot to tier × status table
+            pivot = tally_df.pivot_table(
+                index="conviction_tier", columns="status", values="n", aggfunc="sum", fill_value=0
+            ).reset_index()
+            pivot.columns.name = None
+
+            for col in ["pending", "accepted", "rejected", "expired"]:
+                if col not in pivot.columns:
+                    pivot[col] = 0
+
+            pivot["Total"] = pivot[["pending", "accepted", "rejected", "expired"]].sum(axis=1)
+            pivot["Accept%"] = (
+                pivot["accepted"] / pivot["Total"].replace(0, 1) * 100
+            ).round(1)
+
+            tier_order = {"HIGH": 0, "STANDARD": 1, "AVOID": 2}
+            pivot["_ord"] = pivot["conviction_tier"].map(lambda x: tier_order.get(x, 9))
+            pivot = pivot.sort_values("_ord").drop(columns=["_ord"])
+            pivot = pivot.rename(columns={
+                "conviction_tier": "Tier",
+                "pending":  "Pending",
+                "accepted": "Accepted",
+                "rejected": "Rejected",
+                "expired":  "Expired",
+            })
+            disp_cols = ["Tier", "Total", "Pending", "Accepted", "Rejected", "Expired", "Accept%"]
+            st.dataframe(
+                pivot[[c for c in disp_cols if c in pivot.columns]],
+                hide_index=True,
+                use_container_width=False,
+                column_config={
+                    "Accept%": st.column_config.NumberColumn("Accept%", format="%.1f%%"),
+                },
+            )
+
+        st.divider()
+
+        # ── SECTION 8 — Recent activity ───────────────────────────────────────
         st.subheader("Recent Activity")
         if not live_df.empty:
             recent = live_df.sort_values("entry_date", ascending=False).head(20)

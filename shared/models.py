@@ -46,6 +46,21 @@ class Signal(Base):
     positions_open_at_signal = Column(Integer)   # open count when signal fired
     cap_at_signal = Column(Integer)              # MAX_CONCURRENT_POSITIONS at that time
 
+    # Conviction tier — set by scanner at signal creation time (Checkpoint 8b+).
+    # NULL for signals created before Checkpoint 8b.
+    #
+    # Tier rules (see analysis/conviction.py):
+    #   'HIGH'     = market 6M in bottom-2 quintiles AND synthetic basket above 200-DMA
+    #   'AVOID'    = market 6M in strong_uptrend quintile
+    #   'STANDARD' = everything else (incl. when basket data unavailable)
+    #
+    # Additive score: +1 below_200dma, +1 bottom-2 quintiles, +1 basket above 200-DMA,
+    # -1 above_200dma + strong_uptrend.  Range: -1 to +3.
+    # Revisit finer scoring (>3 tiers) once 12-18 months of live tier-tagged signals
+    # exist with 50+ trades per tier to revalidate.
+    conviction_tier = Column(String(20))   # 'HIGH' | 'STANDARD' | 'AVOID' | NULL
+    regime_score    = Column(Integer)      # -1 to +3 | NULL
+
     created_at = Column(String(30), nullable=False, default=_now)
     updated_at = Column(String(30), nullable=False, default=_now)
     strategy_version = Column(String(20), nullable=False, default="52wh_v1")

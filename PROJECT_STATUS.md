@@ -266,6 +266,57 @@ venv\Scripts\python.exe 52WeekHigh\run_regime_analysis.py --checkpoint tag --for
 
 ---
 
+---
+
+### ✅ Checkpoint 8b — Live Conviction Tier + Capital Simulation Dashboard (complete)
+
+**Goal**: Attach a conviction tier to every live scanner signal, surface it in Telegram
+alerts and the dashboard, and add an Rs.1,000/trade simulation view to the Regime Analysis tab.
+
+**Files created/modified:**
+- `shared/models.py` — added `conviction_tier TEXT` and `regime_score INTEGER` to Signal table
+- `52WeekHigh/analysis/conviction.py` — new: `get_signal_conviction(ticker, signal_date)` using
+  cached market regime + synthetic basket data; 23h cache TTL
+- `52WeekHigh/scanner/scanner.py` — calls conviction module per new signal; stores tier + score;
+  logs conviction tier in `_notify_signal()`
+- `52WeekHigh/bot/bot.py` — DB migration for new columns; `_fmt_conviction()` adds tier-specific
+  Telegram text to every signal message; advisory only, never blocks
+- `dashboard/tabs/tab_52wh.py` — live positions and pending signals show conviction tier column;
+  running acceptance tally (generated / accepted / rejected / expired per tier)
+- `dashboard/tabs/tab_regime.py` — Explorer conviction tier filter; new 5th inner tab
+  "Rs.1,000 Simulation" with overall / year-by-year / quintile / tier / score breakdowns
+
+**Conviction tier rules (data-supported, 3 tiers only):**
+
+| Tier | Condition | Backtest avg return |
+|---|---|---|
+| HIGH | market 6M in bottom-2 quintiles AND synthetic basket above 200-DMA | +40–60% (dataset-dependent) |
+| AVOID | market 6M in strong_uptrend quintile | +9% (original) / +22% (survivorship-corrected) |
+| STANDARD | everything else | +24–26% |
+
+**AVOID is advisory-only**: the "AVOID" label is strongest in the original 2022-present
+backtest (+9%). In the longer survivorship-corrected 2019 dataset, strong_uptrend actually
+performs at 22% — roughly average. AVOID signals are still sent to Telegram with a caution
+note; the user makes the final Accept/Reject call.
+
+**DB migration**: handled in `bot.py._migrate_db()` — idempotent ALTER TABLE statements.
+New databases get columns from `models.py` schema directly.
+
+**Finer scoring note**: A numeric score beyond 3 tiers is not justified by current sample
+sizes. Revisit when 12-18 months of live signals are available with ≥50 trades per tier.
+See comment in `analysis/conviction.py` and `shared/models.py`.
+
+**Capital simulation results** (Rs.1,000/trade, illustrative):
+
+| Dataset | Trades | Deployed | P&L | Return% |
+|---|---|---|---|---|
+| 2022-present (original) | 1,052 | Rs.10.52L | Rs.2.87L | 27.3% |
+| 2019-present (corrected) | 1,725 | Rs.17.25L | Rs.3.73L | 21.6% |
+
+HIGH CONVICTION (score ≥2): 47.0% / 31.2% return in the two datasets respectively.
+
+---
+
 ## Open Questions / Pending Decisions
 
 None — all design questions confirmed as of 2026-06-18.

@@ -70,6 +70,7 @@ load_dotenv(_ROOT / ".env")
 from shared.db import session_scope, get_engine
 from shared.models import Signal, Trade
 from backtest.universe import fetch_nifty500
+from analysis.conviction import get_signal_conviction
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -402,20 +403,23 @@ _TYPE_LABELS = {
 def _notify_signal(
     ticker: str, company: str, signal_price: float, benchmark: float,
     open_count: int, cap: int, sig_type: str, sig_id: int,
+    conviction_tier: str | None = None,
 ) -> None:
     """
     CP4 STUB — logs to console.
     CP5 replaces this with Telegram message via bot.py.
 
     Per design spec the Telegram message must include:
-      'Signal price: ₹XXX — actual fill price may differ.'
-    Cap warning included when open_count >= cap — never silently suppressed.
+      'Signal price: Rs.XXX -- actual fill price may differ.'
+    Cap warning included when open_count >= cap -- never silently suppressed.
+    Conviction tier logged here; formatted for Telegram in bot.py._fmt_signal().
     """
-    cap_note  = f"  [CAP REACHED — {open_count}/{cap} positions open]" if open_count >= cap else ""
+    cap_note  = f"  [CAP REACHED -- {open_count}/{cap} positions open]" if open_count >= cap else ""
+    tier_note = f"  [Conviction: {conviction_tier}]" if conviction_tier else ""
     type_disp = _TYPE_LABELS.get(sig_type, sig_type)
     logger.info(
-        "[SIGNAL id=%d] %s (%s) | price=%.2f above 252d-high %.2f | type=%s%s",
-        sig_id, ticker, company, signal_price, benchmark, type_disp, cap_note,
+        "[SIGNAL id=%d] %s (%s) | price=%.2f above 252d-high %.2f | type=%s%s%s",
+        sig_id, ticker, company, signal_price, benchmark, type_disp, tier_note, cap_note,
     )
 
 
@@ -487,6 +491,13 @@ def run_scan(universe_df: pd.DataFrame) -> None:
         company = name_map.get(ticker, "")
         sig_id: Optional[int] = None
 
+        # Conviction tier (advisory only -- never blocks the signal)
+        conviction: dict = {}
+        try:
+            conviction = get_signal_conviction(ticker, today_str)
+        except Exception as exc:
+            logger.debug("Conviction lookup failed for %s: %s", ticker, exc)
+
         try:
             with session_scope() as sess:
                 sig = Signal(
@@ -501,6 +512,8 @@ def run_scan(universe_df: pd.DataFrame) -> None:
                     positions_open_at_signal=open_count,
                     cap_at_signal=cap,
                     strategy_version=STRATEGY_VERSION,
+                    conviction_tier=conviction.get("tier"),
+                    regime_score=conviction.get("score"),
                 )
                 sess.add(sig)
                 sess.flush()
@@ -509,7 +522,11 @@ def run_scan(universe_df: pd.DataFrame) -> None:
             logger.error("Failed to write signal for %s: %s", ticker, exc)
             continue
 
-        _notify_signal(ticker, company, price, hb, open_count, cap, "intraday_provisional", sig_id)
+        _notify_signal(
+            ticker, company, price, hb, open_count, cap,
+            "intraday_provisional", sig_id,
+            conviction_tier=conviction.get("tier"),
+        )
         n_written += 1
 
     logger.info(
