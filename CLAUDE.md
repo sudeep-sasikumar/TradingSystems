@@ -17,6 +17,14 @@ See `PROJECT_STATUS.md` for checkpoint-by-checkpoint build state.
 
 ---
 
+## Git Workflow — DO NOT deviate
+
+- **All commits go directly to `master`** — no feature branches, no PRs, ever.
+- Never create a branch. Never open a PR. Never suggest doing so.
+- When asked to commit: stage the relevant files, commit to master, push to origin/master. Done.
+
+---
+
 ## Confirmed Design Decisions — Do NOT change without asking the user
 
 ### 1. Entry Signal: Dual-benchmark approach
