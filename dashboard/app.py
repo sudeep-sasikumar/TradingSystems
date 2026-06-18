@@ -19,6 +19,7 @@ sys.path.insert(0, str(_DASH))
 
 import streamlit as st
 from tabs.tab_52wh import render_tab as render_52wh
+from tabs.tab_52wh_historic import render_tab as render_52wh_historic
 
 st.set_page_config(
     page_title="TradingSystems Dashboard",
@@ -29,13 +30,10 @@ st.set_page_config(
 st.title("TradingSystems Dashboard")
 st.caption("Phase 1 — 52-Week High Momentum Strategy | NSE / Nifty 500")
 
-tabs = st.tabs(["52-Week High System"])
+tabs = st.tabs(["52-Week High (Live)", "52-Week High (Historic, Survivorship-Corrected)"])
 
 with tabs[0]:
     render_52wh()
 
-# Phase 2+: add tab modules here
-# from tabs.tab_52wh_indicator import render_tab as render_52whi
-# tabs = st.tabs(["52-Week High System", "52WH + Indicator"])
-# with tabs[1]:
-#     render_52whi()
+with tabs[1]:
+    render_52wh_historic()
