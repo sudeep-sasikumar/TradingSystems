@@ -1,28 +1,9 @@
-version: "3.9"
-
-# ── Service Architecture ─────────────────────────────────────────────────────
-#
-# scanner (scheduled job):
-#   Runs briefly every hour during NSE market hours (9:15–15:30 IST /
-#   03:45–10:00 UTC), checks for signals and stop-loss breaches, then
-#   idles until the next scheduled run. APScheduler handles timing internally.
-#   Can be restart: unless-stopped since no persistent connections needed.
-#
-# bot (persistent service):
-#   MUST remain running at all times. python-telegram-bot uses a long-poll
-#   loop waiting for user button-press callbacks. If this process exits,
-#   all pending [Accept]/[Reject] callbacks are lost. This is why it cannot
-#   be a cron job. Use restart: always.
-#
-# dashboard (web server):
-#   Streamlit server — always running on port 8502. Reads from the shared
-#   SQLite DB (no separate data pipeline).
-#
-# All three services share the same ./data volume so they read/write the
-# same SQLite database (trading.db) and cache (nifty500.csv).
-# ─────────────────────────────────────────────────────────────────────────────
-
 services:
+
+  # ── Scanner ──────────────────────────────────────────────────────────────────
+  # Long-running APScheduler process. Wakes hourly during NSE market hours
+  # (9:15–15:30 IST), runs signal scan + EOD confirmation pass, then sleeps.
+  # Can restart on failure — no persistent connections or callbacks to lose.
   scanner:
     build:
       context: .
@@ -31,7 +12,15 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # ── Bot ───────────────────────────────────────────────────────────────────────
+  # Persistent Telegram long-polling service. MUST remain running — if this
+  # exits, in-flight Accept/Reject button callbacks are lost. restart: always.
   bot:
     build:
       context: .
@@ -39,8 +28,16 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
-    restart: always   # always restart — must stay alive for callbacks
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # ── Dashboard ─────────────────────────────────────────────────────────────────
+  # Streamlit web server. Port exposed via DASHBOARD_PORT (.env), default 8502.
+  # Reads only from the shared SQLite DB — no direct dependency on scanner/bot.
   dashboard:
     build:
       context: .
@@ -51,3 +48,18 @@ services:
     ports:
       - "${DASHBOARD_PORT:-8502}:8502"
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8502/_stcore/health')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

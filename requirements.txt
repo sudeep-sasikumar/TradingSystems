@@ -8,6 +8,7 @@ yfinance>=0.2.54
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 sqlalchemy>=2.0.0
+pyarrow>=14.0.0   # required for pandas parquet read/write (daily HIGH/CLOSE cache)
 
 # ─── Environment ──────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0

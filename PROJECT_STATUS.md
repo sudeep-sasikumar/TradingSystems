@@ -6,10 +6,10 @@
 
 ## Current State
 
-- **Date last updated**: 2026-06-17
+- **Date last updated**: 2026-06-18
 - **Active phase**: Phase 1 — 52-Week High Momentum Strategy
-- **Completed checkpoints**: 0 (Scaffolding)
-- **Next action**: Run Checkpoint 1 universe fetch, show output to user for confirmation
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6
+- **Next action**: Phase 1 complete — deploy to Hostinger VPS
 
 ---
 
@@ -40,95 +40,137 @@ All design questions confirmed with user. Full project structure created.
 
 ---
 
-### 🔄 Checkpoint 1 — Universe Fetch + Caching (READY TO RUN)
+### ✅ Checkpoint 1 — Universe Fetch + Caching
+504 Nifty 500 tickers fetched, cached at `data/cache/nifty500.csv`. User confirmed.
 
-**Goal**: Fetch Nifty 500 from NSE, cache locally, show user the list for confirmation.
+---
 
-**Command**:
+### ✅ Checkpoint 2 — Backtest Engine
+Full backtest run: 1,052 closed trades + 152 still open (not stopped out).
+Results saved to `data/trading.db`.
+
+**Corporate action investigation (blocker resolved before CP3):**
+- Ran `diag_corp_actions.py` — full diagnostic across all 1,052 trades
+- 4 confirmed artifacts: CGCL/GPIL/MOTILALOFS (splits, yfinance wrong ex-date = Jan 1, 2024)
+  and VEDL (demerger, Apr 30, 2026 — yfinance has no data)
+- All other large moves (Jun 4, 2024 India election; Adani-Hindenburg; IIFL RBI action) confirmed genuine
+- `KNOWN_ARTIFACTS` set added to `dashboard/tabs/tab_52wh.py`; both original and cleaned stats
+  shown side-by-side in dashboard
+
+---
+
+### ✅ Checkpoint 3 — Dashboard (Backtest View Only)
+Streamlit dashboard live at http://localhost:8502.
+
+**Files implemented:**
+- `dashboard/tabs/tab_52wh.py` — full implementation
+- `dashboard/app.py` — unchanged (already had correct shell)
+
+**Sections delivered:**
+1. Full-period combined stats — two columns: all trades vs. artifacts excluded
+2. Year-by-year table with toggle to exclude artifacts
+3. Equity curve — monthly bar chart + cumulative line (dual y-axis, labeled "Illustrative…")
+4. Trade log — filterable by year / win/loss / artifact flag, sortable
+5. Open positions table (152 backtest trades still running)
+6-7. Live trading placeholders (wired at Checkpoint 4+)
+
+---
+
+### ✅ Checkpoint 4 — Live Scanner (No Telegram Yet)
+
+**File delivered**: `52WeekHigh/scanner/scanner.py`
+
+**What it does:**
+- APScheduler with two jobs (all UTC Mon–Fri):
+  - Hourly scan: 03:00–10:00 UTC (`CronTrigger`), guarded internally to 09:15–15:30 IST
+  - EOD pass: 10:05 UTC = 15:35 IST
+- Daily OHLCV cache per ticker in `data/cache/highs/` (HIGH) and `data/cache/prices/` (CLOSE), 23h TTL
+- Signal benchmark: `high.shift(1).rolling(252).max()` — intraday price vs. 252-day HIGH benchmark
+- EOD close confirmation: `close.shift(1).rolling(252).max()` — determines "eod_confirmed" vs "provisional_unconfirmed"
+- Re-entry suppression: queries open live trades + pending signals; REJECTED/EXPIRED don't suppress
+- Position cap: cap-reached note appended to log; signals never silently suppressed
+- Trailing stop EOD check: CLOSE ≤ max_close × 0.80 → marks trade closed with exit_reason='trailing_stop'
+- `_notify_*` functions are console-logging stubs (Telegram wired at CP5)
+- `--run-now` and `--eod-now` flags for standalone testing
+
+**Standalone test commands:**
 ```powershell
-cd "E:\Trading Systems"
-venv\Scripts\python.exe 52WeekHigh\run_backtest.py --checkpoint universe
+# Single scan (bypasses market-hours guard)
+venv\Scripts\python.exe 52WeekHigh\scanner\scanner.py --run-now
+# Single EOD pass
+venv\Scripts\python.exe 52WeekHigh\scanner\scanner.py --eod-now
 ```
 
-**Files**:
-- `52WeekHigh/backtest/universe.py` — fully implemented
-- `52WeekHigh/run_backtest.py` — Checkpoint 1 implemented
-
-**Status**: Awaiting user confirmation of Nifty 500 list output.
+**Risk flag**: yfinance intraday reliability for 500 tickers — untested at scale. Retry/backoff built in (tenacity, 3 attempts, exponential back-off). Escalate to user if failure rate is unacceptable (upgrade path: Zerodha Kite Connect).
 
 ---
 
-### ⬜ Checkpoint 2 — Backtest Engine
+### ✅ Checkpoint 5 — Telegram Bot (Accept/Reject)
 
-Not started. Start only after Checkpoint 1 confirmed.
+**File delivered**: `52WeekHigh/bot/bot.py`
 
-**Files to create/complete**:
-- `52WeekHigh/backtest/engine.py` — core strategy: signal detection, trailing stop, exit logic, trade records
-- Extend `52WeekHigh/run_backtest.py` with `--checkpoint backtest`
-- Populate SQLite `trades` table (strategy_version = "52wh_v1")
-- Output: combined stats + year-by-year breakdown table + sample trades for user to spot-check
+**Architecture**: PTB v21 Application with long-polling; PTB JobQueue for background jobs; bot polls DB for signals — scanner never calls Telegram directly.
 
-**Backtest spec**:
-- Period: Jan 2022 – today; lookback data from ~Jan 2021
-- Data: yfinance daily OHLCV, `.NS` suffix, chunks of ~50, with retry/backoff
-- Signal: daily CLOSE > max(daily CLOSE, prior 252 trading days)
-- Exit: daily CLOSE ≤ trailing_stop (= max_price_since_entry × 0.80)
-- Per-trade record: ticker, company_name, entry_date, entry_price, highest_price_reached, exit_date, exit_price, holding_days, return_pct, trade_year
-- Stats: combined (full period) + year-by-year table
+**DB migration on startup**: adds `eod_notified INTEGER` to signals, `exit_notified INTEGER` to trades (ALTER TABLE, idempotent).
 
----
+**Background jobs (PTB JobQueue):**
+- `poll_signals` every 60s — sends unsent pending signals (telegram_message_id IS NULL) with [✅ Accept] [❌ Reject] inline keyboard
+- `poll_eod` every 300s — sends EOD confirmation follow-ups for eod_confirmed / provisional_unconfirmed signals
+- `poll_exits` every 300s — sends exit notifications for closed live trades (exit_notified=0)
+- `poll_expiry` every 300s — expires signals >24h pending, sends expiry note
+- `eod_summary` daily at 10:15 UTC Mon–Fri — signals today, accepted/rejected/expired, open positions with trailing stops
 
-### ⬜ Checkpoint 3 — Dashboard (Backtest View Only)
+**Callback handler (Accept/Reject):**
+- `accept:{id}` → Signal.status='accepted', creates Trade(source='live', entry_price=signal_price, trailing_stop=price×0.80)
+- `reject:{id}` → Signal.status='rejected' (stock eligible for future signals)
+- Both edit the original Telegram message to show result
 
-Not started. Start after Checkpoint 2 validated.
+**Commands**: `/start`, `/status` (open positions + today's pending), `/positions` (full open list with stops)
 
-**Files to complete**:
-- `dashboard/tabs/tab_52wh.py` — backtest stats, year-by-year table, trade log, equity curve
-- Chart label: `"Illustrative, equal-weight, no capital constraints — not a real portfolio simulation"`
+**Message design per spec:**
+- "Signal price: ₹XXX — actual fill price may differ."
+- Cap warning: "CAP REACHED — X/X positions open (signal still recorded)" — never suppressed
+- All messages use MarkdownV2 with proper escaping
 
----
-
-### ⬜ Checkpoint 4 — Live Scanner (No Telegram Yet)
-
-Not started. Start after Checkpoint 3.
-
-**Files to complete**:
-- `52WeekHigh/scanner/scanner.py` — hourly scanner, APScheduler, market-hours check
-- Signal logic: intraday price > max(daily HIGH, prior 252 trading days)
-- Cross-references open positions + pending signals from SQLite
-- Checks trailing stop breaches
-- Verify signal detection on recent real data before wiring Telegram
-
-**Risk flag**: yfinance intraday reliability for 500 tickers. Test carefully. Report to user if unacceptable.
+**Also in this checkpoint**: Fixed `datetime.utcnow()` deprecation in `scanner.py` → `datetime.now(timezone.utc)`; added `timezone` to scanner's imports.
 
 ---
 
-### ⬜ Checkpoint 5 — Telegram Bot (Accept/Reject)
+### ✅ Checkpoint 6 — Docker + Deployment
 
-Not started. Start after Checkpoint 4.
+**Files delivered**:
+- `docker/Dockerfile.scanner` — python:3.13-slim, PYTHONUNBUFFERED, requirements layer cached
+- `docker/Dockerfile.bot` — same base, long-poll CMD
+- `docker/Dockerfile.dashboard` — adds EXPOSE 8502, HEALTHCHECK on `/_stcore/health`, `--server.headless=true`
+- `docker-compose.yml` — all three services with bind mount `./data:/app/data`, log rotation (10MB×3), healthcheck on dashboard
+- `.dockerignore` — excludes venv/, data/, .env, __pycache__, diag script
 
-**Files to complete**:
-- `52WeekHigh/bot/bot.py` — persistent python-telegram-bot service
-- Entry signal → inline keyboard [Accept] [Reject]
-- Cap warning in message when MAX_CONCURRENT_POSITIONS reached
-- 24-hour auto-expiry with follow-up message
-- On Accept: create open position record in DB
-- Stop-loss exit alerts: automatic, no buttons needed
-- Daily EOD summary (not per-scan — too spammy hourly)
-- Trailing stop daily updates for open positions
+**Restart policies**:
+- `bot`: `restart: always` — must stay alive for Telegram callbacks
+- `scanner`: `restart: unless-stopped` — stateless, safe to restart
+- `dashboard`: `restart: unless-stopped`
 
----
+**Also in this checkpoint**:
+- Signal type label renamed: "Intraday Provisional" → "Provisional" in Telegram messages and scanner logs
+- `pyarrow>=14.0.0` added to requirements.txt (was transitively installed but not pinned)
 
-### ⬜ Checkpoint 6 — Docker + Deployment
+**Deploy to Hostinger VPS (one-time setup)**:
+```bash
+# On VPS
+git clone https://github.com/sudeep-sasikumar/TradingSystems.git
+cd TradingSystems
+cp .env.example .env   # fill in BOT_TOKEN, CHAT_ID, etc.
+mkdir -p data/cache
+docker compose up -d --build
+docker compose ps      # verify all three services running
+```
 
-Not started. Build last.
-
-**Files to complete**:
-- `docker/Dockerfile.scanner` — flesh out stub
-- `docker/Dockerfile.bot` — flesh out stub
-- `docker/Dockerfile.dashboard` — flesh out stub
-- `docker-compose.yml` — flesh out stub
-- Target: one-click deploy on Hostinger VPS from GitHub repo
+**Day-to-day**:
+```bash
+docker compose pull && docker compose up -d   # deploy latest from git
+docker compose logs -f bot                    # tail bot logs
+docker compose logs -f scanner               # tail scanner logs
+```
 
 ---
 

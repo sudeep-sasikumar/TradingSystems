@@ -1,0 +1,23 @@
+# Python runtime artifacts
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Secrets — injected at runtime via docker-compose env_file
+.env
+
+# Git
+.git/
+.gitignore
+
+# Data directory — mounted as a bind volume at runtime, not baked into image
+# (trading.db, nifty500.csv, daily cache parquet files)
+data/
+
+# Dev-only scripts not needed in production images
+diag_corp_actions.py

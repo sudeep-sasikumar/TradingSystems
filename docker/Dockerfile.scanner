@@ -1,9 +1,16 @@
-# Scanner Service — Hourly intraday job during NSE market hours
-# Stub — flesh out at Checkpoint 6
-FROM python:3.11-slim
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
+
+# Install dependencies first so this layer is cached across code-only changes
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
-# APScheduler inside scanner.py handles the hourly market-hours schedule
+
+# APScheduler inside scanner.py handles the hourly 9:15–15:30 IST schedule.
+# No cron needed — the process runs continuously and sleeps between market hours.
 CMD ["python", "52WeekHigh/scanner/scanner.py"]
