@@ -277,7 +277,20 @@ def load_baseline_industries() -> dict[str, list[str]]:
     Read baseline CSV and return {industry → [ticker_symbols]} dict.
     Tickers are in Yahoo Finance format (e.g. "RELIANCE.NS").
     """
-    df = pd.read_csv(BASELINE_CSV, dtype=str).fillna("")
+    csv_path = BASELINE_CSV
+    if not csv_path.exists():
+        # Docker named-volume deployment: /app/data/ is masked by the volume mount,
+        # so fall back to the bundled copy placed outside /app/data/ by Dockerfile.dashboard.
+        bundled = Path("/app/reconstitution_pdfs_bundled") / "nifty500_baseline_20200725.csv"
+        if bundled.exists():
+            logger.info("Using Docker-bundled baseline CSV at %s", bundled)
+            csv_path = bundled
+        else:
+            raise FileNotFoundError(
+                f"Baseline CSV not found at {BASELINE_CSV} or {bundled}. "
+                "Ensure data/reconstitution_pdfs/ contains the baseline CSV."
+            )
+    df = pd.read_csv(csv_path, dtype=str).fillna("")
     df.columns = df.columns.str.strip()
 
     sym_col = next((c for c in df.columns if c.strip().lower() == "symbol"), None)
