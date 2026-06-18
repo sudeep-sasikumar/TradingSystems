@@ -8,8 +8,8 @@
 
 - **Date last updated**: 2026-06-18
 - **Active phase**: Phase 1 — 52-Week High Momentum Strategy
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6
-- **Next action**: Phase 1 complete — deploy to Hostinger VPS
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c (VPS deployment fix)
+- **Next action**: SSH into VPS → git pull → docker compose up --build -d → open Setup & Admin tab → Run All Steps
 
 ---
 
@@ -159,17 +159,25 @@ venv\Scripts\python.exe 52WeekHigh\scanner\scanner.py --eod-now
 # On VPS
 git clone https://github.com/sudeep-sasikumar/TradingSystems.git
 cd TradingSystems
-cp .env.example .env   # fill in BOT_TOKEN, CHAT_ID, etc.
+cp .env.example .env        # fill in BOT_TOKEN, CHAT_ID, etc.
 mkdir -p data/cache
-docker compose up -d --build
-docker compose ps      # verify all three services running
+docker compose up --build -d
+docker compose ps           # verify all three services running
+# Then open http://<VPS_IP>:8502 → Setup & Admin tab → Run All Steps
 ```
 
-**Day-to-day**:
+**Day-to-day (deploy latest code)**:
 ```bash
-docker compose pull && docker compose up -d   # deploy latest from git
-docker compose logs -f bot                    # tail bot logs
-docker compose logs -f scanner               # tail scanner logs
+git pull
+docker compose up --build -d
+docker compose ps
+```
+
+**Tail logs**:
+```bash
+docker compose logs -f bot        # Telegram bot
+docker compose logs -f scanner    # hourly scanner
+docker compose logs -f dashboard  # Streamlit
 ```
 
 ---
@@ -314,6 +322,38 @@ See comment in `analysis/conviction.py` and `shared/models.py`.
 | 2019-present (corrected) | 1,725 | Rs.17.25L | Rs.3.73L | 21.6% |
 
 HIGH CONVICTION (score ≥2): 47.0% / 31.2% return in the two datasets respectively.
+
+---
+
+---
+
+### ✅ Checkpoint 8c — VPS Deployment Fix + Setup Tab (complete)
+
+**Problem**: `docker-compose.yml` used `image: ghcr.io/sudeep-sasikumar/tradingsystems-*:latest`
+with no CI pipeline to build those images. `git pull` on the VPS pulled new code but never
+rebuilt containers, so the VPS always ran stale images. Also used named Docker volume which
+masked committed PDF files inside containers.
+
+**Fix**:
+- `docker-compose.yml`: replaced all `image:` pulls with `build: context: . / dockerfile: docker/Dockerfile.*`.
+  Now `docker compose up --build -d` always builds from source. Named volume replaced with
+  `./data:/app/data` bind mount — committed PDFs and baseline CSV accessible immediately.
+- `dashboard/tabs/tab_setup.py` (new): Setup & Admin tab with:
+  - Live DB status metrics (trade counts, regime tag counts, membership rows)
+  - "Refresh Status" button
+  - Step 1: Run original backtest (2022-present, 52wh_v1)
+  - Step 2: Run survivorship-corrected backtest (membership table → historic backtest)
+  - Step 3: Tag regimes for both strategy versions
+  - "Run All Steps" button (primary, sequential, ~30-60 min first run)
+  - Advanced expander with CLI equivalents for unattended VPS setup
+- `dashboard/app.py`: added "Setup & Admin" as 4th tab
+- `52WeekHigh/analysis/capital_simulation.py`: committed (was untracked)
+
+**VPS update command** (after this commit is on master):
+```bash
+git pull && docker compose up --build -d
+# Then: open http://<VPS_IP>:8502 → Setup & Admin tab → Run All Steps
+```
 
 ---
 
