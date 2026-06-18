@@ -176,39 +176,41 @@ docker compose logs -f scanner               # tail scanner logs
 
 ---
 
-### 🔄 Checkpoint 7 — Survivorship-Corrected Historic Backtest (in progress)
+### ✅ Checkpoint 7 — Survivorship-Corrected Historic Backtest (complete)
 
 **Goal**: Run 52wk-high strategy over ~7-year window (Oct 2019 – present) using
 ACTUAL historical Nifty 500 membership, not today's list projected backward.
 Tagged `strategy_version = "52wh_v1_survivorship_10y"` per user spec.
 
-**Phase 2 — Membership table (code done; awaiting PDFs)**
-
-Files created:
+**Files created/modified:**
 - `shared/models.py` — added `IndexMembership` table
-- `52WeekHigh/historic_universe/__init__.py`
 - `52WeekHigh/historic_universe/build_membership.py` — baseline CSV + PDF parser + reconstruction
 - `52WeekHigh/historic_universe/historic_engine.py` — extended backtest engine (time-varying universe)
 - `52WeekHigh/run_historic_backtest.py` — CLI entry point
-- `requirements.txt` — added `pdfplumber>=0.11.0`
 - `data/reconstitution_pdfs/nifty500_baseline_20200725.csv` — July 2020 Wayback Machine snapshot (501 stocks)
+- `data/reconstitution_pdfs/*.pdf` — 11 PDFs downloaded (NOT committed to git)
 
-**User must**: Download ~13 semi-annual reconstitution PDFs from
-https://niftyindices.com/announcements/reconstitution
-(all "Nifty 500" entries from Sep 2019 to present)
-Save as `*.pdf` files in `data/reconstitution_pdfs/`
+**Membership table:** 654 intervals, 153 exact dates (from 7 reconstitution PDFs), 501 inferred
+**Missing reconstitutions (data gaps):** Sep 2020, Mar 2021, Sep 2021, Sep 2023, Sep 2024
+(stocks in these periods treated as continuously present since baseline — mild survivorship bias remains)
 
-**Then run**:
-```powershell
-# Step 1 — build membership table
-venv\Scripts\python.exe 52WeekHigh\run_historic_backtest.py --checkpoint membership
+**Backtest results (Oct 2019 – Jun 2026, strategy_version=52wh_v1_survivorship_10y):**
 
-# Step 2 — extended backtest (~10-20 min, downloads 2018-present price history)
-venv\Scripts\python.exe 52WeekHigh\run_historic_backtest.py --checkpoint backtest
-```
+| Metric | Value |
+|---|---|
+| Closed trades | 1,725 |
+| Win rate | 49.9% |
+| Avg return / trade | +21.63% |
+| Median return | -0.2% |
+| Avg holding days | 228.5 |
+| Best trade | +660.33% |
+| Worst trade | -67.63% |
+
+Year-by-year win rates: 2020 65.7%, 2021 45.9%, 2022 42.9%, 2023 73.2%, 2024 35.4%, 2025 23.4%
 
 **Phase 3 — Dashboard (not started)**: Add new tab section showing year-by-year breakdown
 with constituent count, equity curve, and side-by-side comparison vs original 2022-2026 results.
+Do NOT start until user confirms data quality is acceptable.
 
 ---
 
