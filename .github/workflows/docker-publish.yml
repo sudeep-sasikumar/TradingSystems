@@ -3,13 +3,6 @@ name: Build and Push Docker Images
 on:
   push:
     branches: [master]
-    paths:
-      - "52WeekHigh/**"
-      - "dashboard/**"
-      - "shared/**"
-      - "docker/**"
-      - "requirements.txt"
-      - ".github/workflows/**"
   workflow_dispatch:
 
 env:
