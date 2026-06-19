@@ -191,6 +191,36 @@ class Sp500Membership(Base):
     )
 
 
+class Sp500TradeFreshness(Base):
+    """
+    Freshness factor for S&P 500 backtest trades.
+
+    Written by: 52WeekHigh/analysis/freshness_tagger.py  (tag_freshness_sp500)
+    Read by:    dashboard/tabs/tab_sp500.py
+
+    See freshness_tagger.py module docstring for category definitions.
+    Run after --checkpoint backtest (prices must be in cache).
+    """
+    __tablename__ = "sp500_trade_freshness"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id             = Column(Integer, ForeignKey("trades.id"), nullable=False, unique=True)
+    ticker               = Column(String(20), nullable=False)
+    entry_date           = Column(String(10), nullable=False)
+
+    # 'insufficient_history' | 'first_observed_high' | 'gap_computed'
+    freshness_category   = Column(String(25))
+    freshness_gap_td     = Column(Integer)       # NULL unless gap_computed
+    freshness_gap_cal    = Column(Integer)       # NULL unless gap_computed
+    freshness_prior_date = Column(String(10))    # NULL unless gap_computed
+
+    created_at = Column(String(30), nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("ix_sp500_freshness_entry", "entry_date"),
+    )
+
+
 class Sp500MarketRegime(Base):
     """
     Daily ^GSPC + ^VIX regime signals for the S&P 500 system.

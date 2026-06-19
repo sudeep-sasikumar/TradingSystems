@@ -191,15 +191,59 @@ def render_tab() -> None:
 
     st.divider()
 
+    # ── Step 8 — Nifty freshness ───────────────────────────────────────────────
+    st.subheader("Step 8 — Tag Freshness Factor (Nifty, both datasets)")
+    st.markdown(
+        "Computes the trading-day gap between each trade's entry and the previous time the "
+        "same stock made a new 52-week high, using only data available at the time (no lookahead).  \n"
+        "Stores results in `trade_regime_tags` (adds 4 freshness columns).  \n"
+        "**Run after Step 3** (regime tags must exist).  Re-run if Step 3 is re-run.  \n"
+        "**Est. runtime:** ~2–5 min per dataset (reads parquet cache, no network calls)"
+    )
+    if st.button("▶  Tag Nifty Freshness (both datasets)", key="btn_freshness_nifty"):
+        _run_step(
+            label="Freshness — 52wh_v1 (original)",
+            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
+                 "--strategy-version", "52wh_v1"],
+            timeout=600,
+        )
+        _run_step(
+            label="Freshness — 52wh_v1_survivorship_10y (historic)",
+            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
+                 "--strategy-version", "52wh_v1_survivorship_10y"],
+            timeout=600,
+        )
+        st.info("Done — open the **Regime Analysis → Freshness Factor** tab to see results.")
+
+    st.divider()
+
+    # ── Step 9 — S&P 500 freshness ────────────────────────────────────────────
+    st.subheader("Step 9 — Tag Freshness Factor (S&P 500)")
+    st.markdown(
+        "Computes freshness factor for all `sp500_52wh_v1` backtest trades and stores "
+        "results in the `sp500_trade_freshness` table.  \n"
+        "**Run after Step 5** (S&P 500 backtest must be complete).  \n"
+        "**Est. runtime:** ~5–15 min (reads parquet cache for ~900 tickers, no network calls)"
+    )
+    if st.button("▶  Tag S&P 500 Freshness", key="btn_freshness_sp500"):
+        _run_step(
+            label="S&P 500 Freshness Factor",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "freshness"],
+            timeout=900,
+        )
+        st.info("Done — open the **S&P 500 → Freshness Factor** tab to see results.")
+
+    st.divider()
+
     # ── Run All ────────────────────────────────────────────────────────────────
-    st.subheader("Run All Steps (1 → 2 → 3 → 4 → 5 → 6)")
+    st.subheader("Run Everything (Steps 1 → 9)")
     st.warning(
-        "Runs all Nifty + S&P 500 steps sequentially. **Total runtime: 90–150 min** "
-        "on first run (price downloads for both universes). "
+        "Runs all Nifty + S&P 500 steps sequentially, including freshness tagging. "
+        "**Total runtime: 100–165 min** on first run (price downloads for both universes). "
         "Do not close this browser tab. If you prefer, SSH into the VPS and use the CLI "
         "commands in the Advanced section below instead."
     )
-    if st.button("▶  Run All Steps", key="btn_all", type="primary"):
+    if st.button("▶  Run Everything (Steps 1–9)", key="btn_all", type="primary"):
         st.markdown("**Step 1 — Original Backtest**")
         _run_step(
             label="Original Backtest (52wh_v1)",
@@ -250,6 +294,26 @@ def render_tab() -> None:
             label="S&P 500 Regime (CP-S4) — ^GSPC + ^VIX 200-DMA",
             cmd=[_PY, _RUN_SP500, "--checkpoint", "regime"],
             timeout=300,
+        )
+        st.markdown("**Step 7 — Nifty Freshness (original)**")
+        _run_step(
+            label="Freshness — 52wh_v1",
+            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
+                 "--strategy-version", "52wh_v1"],
+            timeout=600,
+        )
+        st.markdown("**Step 8 — Nifty Freshness (historic)**")
+        _run_step(
+            label="Freshness — 52wh_v1_survivorship_10y",
+            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
+                 "--strategy-version", "52wh_v1_survivorship_10y"],
+            timeout=600,
+        )
+        st.markdown("**Step 9 — S&P 500 Freshness**")
+        _run_step(
+            label="S&P 500 Freshness Factor",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "freshness"],
+            timeout=900,
         )
         st.success("All steps complete — click **Refresh Status** at the top to verify.")
 
@@ -302,29 +366,51 @@ def _db_status() -> None:
     c5.metric("Live Trades",         f"{n_live:,}")
     c6.metric("Nifty Membership",    f"{n_membership:,}", help="Point-in-time Nifty 500 membership intervals")
 
-    n_sp500_regime = _q("SELECT COUNT(*) FROM sp500_market_regime")
-    n_sp500_live   = _q("SELECT COUNT(*) FROM trades WHERE strategy_version='sp500_52wh_v1' AND source='live'")
-    n_sp500_pend   = _q("SELECT COUNT(*) FROM signals WHERE strategy_version='sp500_52wh_v1' AND status='pending'")
+    n_sp500_regime   = _q("SELECT COUNT(*) FROM sp500_market_regime")
+    n_sp500_live     = _q("SELECT COUNT(*) FROM trades WHERE strategy_version='sp500_52wh_v1' AND source='live'")
+    n_sp500_pend     = _q("SELECT COUNT(*) FROM signals WHERE strategy_version='sp500_52wh_v1' AND status='pending'")
+    n_sp500_freshness = _q("SELECT COUNT(*) FROM sp500_trade_freshness")
+    n_fresh_orig     = _q(
+        "SELECT COUNT(*) FROM trade_regime_tags trt "
+        "JOIN trades t ON trt.trade_id = t.id "
+        "WHERE t.strategy_version = '52wh_v1' AND trt.freshness_category IS NOT NULL"
+    )
+    n_fresh_hist     = _q(
+        "SELECT COUNT(*) FROM trade_regime_tags trt "
+        "JOIN trades t ON trt.trade_id = t.id "
+        "WHERE t.strategy_version = '52wh_v1_survivorship_10y' AND trt.freshness_category IS NOT NULL"
+    )
 
     st.markdown("**S&P 500 (US)**")
-    d1, d2, d3, d4, d5 = st.columns(5)
-    d1.metric("SP500 Membership",    f"{n_sp500_member:,}", help="Historical constituent intervals")
-    d2.metric("SP500 Backtest",      f"{n_sp500_trades:,}", help="strategy_version=sp500_52wh_v1, source=backtest")
-    d3.metric("SP500 Regime Days",   f"{n_sp500_regime:,}", help="^GSPC 200-DMA + VIX daily rows")
-    d4.metric("SP500 Live Trades",   f"{n_sp500_live:,}",   help="Open + closed live trades")
-    d5.metric("SP500 Pending Sigs",  f"{n_sp500_pend:,}",   help="Pending S&P 500 signals (awaiting Accept/Reject)")
+    d1, d2, d3, d4, d5, d6 = st.columns(6)
+    d1.metric("SP500 Membership",    f"{n_sp500_member:,}",   help="Historical constituent intervals")
+    d2.metric("SP500 Backtest",      f"{n_sp500_trades:,}",   help="strategy_version=sp500_52wh_v1, source=backtest")
+    d3.metric("SP500 Regime Days",   f"{n_sp500_regime:,}",   help="^GSPC 200-DMA + VIX daily rows")
+    d4.metric("SP500 Freshness",     f"{n_sp500_freshness:,}", help="sp500_trade_freshness rows (Step 9)")
+    d5.metric("SP500 Live Trades",   f"{n_sp500_live:,}",     help="Open + closed live trades")
+    d6.metric("SP500 Pending Sigs",  f"{n_sp500_pend:,}",     help="Pending S&P 500 signals (awaiting Accept/Reject)")
+
+    st.markdown("**Nifty Freshness**")
+    nf1, nf2 = st.columns(2)
+    nf1.metric("Nifty Fresh (Original)",  f"{n_fresh_orig:,}",
+               help="trade_regime_tags rows with freshness_category set — 52wh_v1")
+    nf2.metric("Nifty Fresh (Historic)",  f"{n_fresh_hist:,}",
+               help="trade_regime_tags rows with freshness_category set — 52wh_v1_survivorship_10y")
 
     nifty_checks = {
-        "Nifty original backtest":  n_orig > 500,
-        "Nifty historic backtest":  n_hist > 500,
-        "Nifty membership table":   n_membership > 0,
-        "Nifty regime tags (orig)": n_tags_orig > 500,
-        "Nifty regime tags (hist)": n_tags_hist > 500,
+        "Nifty original backtest":   n_orig > 500,
+        "Nifty historic backtest":   n_hist > 500,
+        "Nifty membership table":    n_membership > 0,
+        "Nifty regime tags (orig)":  n_tags_orig > 500,
+        "Nifty regime tags (hist)":  n_tags_hist > 500,
+        "Nifty freshness (orig)":    n_fresh_orig > 500,
+        "Nifty freshness (hist)":    n_fresh_hist > 500,
     }
     sp500_checks = {
-        "S&P 500 membership table": n_sp500_member > 400,
-        "S&P 500 backtest trades":  n_sp500_trades > 500,
-        "S&P 500 regime table":     n_sp500_regime > 1000,
+        "S&P 500 membership table":  n_sp500_member > 400,
+        "S&P 500 backtest trades":   n_sp500_trades > 500,
+        "S&P 500 regime table":      n_sp500_regime > 1000,
+        "S&P 500 freshness":         n_sp500_freshness > 500,
     }
     all_checks = {**nifty_checks, **sp500_checks}
 
@@ -339,6 +425,16 @@ def _db_status() -> None:
         st.info(
             "**Next step (S&P 500):** Run **Step 6 — S&P 500 Regime** below. "
             "Your backtest is complete; regime tags enable the Regime Analysis sub-tab. (~1–2 min)"
+        )
+    if n_sp500_trades > 500 and n_sp500_freshness == 0:
+        st.info(
+            "**Next step (S&P 500 freshness):** Run **Step 9 — Tag S&P 500 Freshness** below. "
+            "Your backtest is complete; freshness data enables the Freshness Factor sub-tab. (~5–15 min)"
+        )
+    if n_tags_hist > 500 and n_fresh_hist == 0:
+        st.info(
+            "**Next step (Nifty freshness):** Run **Step 8 — Tag Nifty Freshness** below. "
+            "Regime tags are present; freshness data enables the Freshness Factor sub-tab. (~2–5 min)"
         )
     if n_orig > 500 and n_tags_orig == 0:
         st.info(
@@ -398,18 +494,18 @@ def _advanced_section() -> None:
 **Preferred approach for first-time VPS setup (run inside the container):**
 
 ```bash
-# Step 1: original Nifty backtest
+# Step 1: original Nifty backtest (~5-15 min)
 docker compose exec dashboard python 52WeekHigh/run_backtest.py --checkpoint backtest
 
-# Step 2: Nifty historic backtest
+# Step 2: Nifty historic backtest (~20-45 min first run)
 docker compose exec dashboard python 52WeekHigh/run_historic_backtest.py --checkpoint membership
 docker compose exec dashboard python 52WeekHigh/run_historic_backtest.py --checkpoint backtest
 
-# Step 3: regime tags
+# Step 3: Nifty regime tags (~2-5 min per dataset)
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint tag --strategy-version 52wh_v1
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint tag --strategy-version 52wh_v1_survivorship_10y
 
-# Step 4: S&P 500 membership table
+# Step 4: S&P 500 membership table (< 1 min)
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint membership
 
 # Step 5: S&P 500 backtest (45-90 min, ~900 tickers x 20 years of prices)
@@ -418,8 +514,15 @@ docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint ba
 # Step 6: S&P 500 regime analysis (~1-2 min, downloads ^GSPC + ^VIX)
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint regime
 
-# Step 7: S&P 500 scanner test run (run after US market close)
+# Step 7: Scanner test run (run after US market close)
 docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
+
+# Step 8: Nifty freshness factor (~2-5 min per dataset, must run after Step 3)
+docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint freshness --strategy-version 52wh_v1
+docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint freshness --strategy-version 52wh_v1_survivorship_10y
+
+# Step 9: S&P 500 freshness factor (~5-15 min, must run after Step 5)
+docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint freshness
 ```
 
 **S&P 500 scanner continuous service (runs in `sp500_scanner` Docker container):**

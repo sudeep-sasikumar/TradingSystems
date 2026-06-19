@@ -77,6 +77,7 @@ ROLLING_WINDOW = 252
 _CACHE_DIRS: dict[str, Path] = {
     "52wh_v1":                   _ROOT / "data" / "cache" / "prices",
     "52wh_v1_survivorship_10y":  _ROOT / "data" / "cache" / "prices_historic",
+    "sp500_52wh_v1":             _ROOT / "data" / "cache" / "prices_sp500",
 }
 
 # Bucket boundaries and labels (inclusive lower, exclusive upper, trading days)
@@ -579,3 +580,139 @@ def run_freshness_analysis() -> None:
   by this analysis step.  Findings are advisory; implementation is
   a separate decision.
 """)
+
+
+# ── S&P 500 freshness ─────────────────────────────────────────────────────────
+
+def tag_freshness_sp500() -> dict:
+    """
+    Compute freshness factor for all sp500_52wh_v1 backtest trades and store
+    results in the sp500_trade_freshness table (DELETE + INSERT, safe to re-run).
+
+    Requires the prices_sp500 cache to be populated (run --checkpoint backtest first).
+    Returns summary dict with counts per category.
+    """
+    from shared.models import Base
+
+    engine = get_engine()
+
+    # Create table if not exists (idempotent)
+    Base.metadata.create_all(engine)
+
+    cache_dir = _CACHE_DIRS["sp500_52wh_v1"]
+    if not cache_dir.exists():
+        raise FileNotFoundError(
+            f"S&P 500 price cache not found: {cache_dir}\n"
+            "Run:  python SP500/run_sp500_backtest.py --checkpoint backtest"
+        )
+
+    # All closed sp500 backtest trades
+    trades = pd.read_sql(
+        """
+        SELECT id AS trade_id, ticker, entry_date
+        FROM trades
+        WHERE strategy_version = 'sp500_52wh_v1'
+          AND source = 'backtest'
+        ORDER BY entry_date
+        """,
+        engine,
+    )
+
+    if trades.empty:
+        logger.warning("No sp500_52wh_v1 backtest trades found. Run --checkpoint backtest first.")
+        return {"total": 0}
+
+    logger.info("Computing freshness for %d S&P 500 trades …", len(trades))
+
+    series_cache: dict[str, Optional[pd.Series]] = {}
+    records: list[dict] = []
+    counts: dict[str, int] = {"insufficient_history": 0, "first_observed_high": 0, "gap_computed": 0}
+
+    for i, row in trades.iterrows():
+        result = _compute_freshness(
+            ticker         = str(row["ticker"]),
+            entry_date_str = str(row["entry_date"]),
+            series_cache   = series_cache,
+            cache_dir      = cache_dir,
+        )
+        counts[result["category"]] = counts.get(result["category"], 0) + 1
+        records.append({
+            "trade_id":            int(row["trade_id"]),
+            "ticker":              str(row["ticker"]),
+            "entry_date":          str(row["entry_date"]),
+            "freshness_category":  result["category"],
+            "freshness_gap_td":    result["gap_td"],
+            "freshness_gap_cal":   result["gap_cal"],
+            "freshness_prior_date": result["prior_date"],
+        })
+
+        if (i + 1) % 500 == 0 or (i + 1) == len(trades):
+            logger.info("  … %d / %d done", i + 1, len(trades))
+
+    # DELETE + INSERT (idempotent)
+    trade_ids = [r["trade_id"] for r in records]
+    insert_stmt = text("""
+        INSERT OR REPLACE INTO sp500_trade_freshness
+            (trade_id, ticker, entry_date,
+             freshness_category, freshness_gap_td, freshness_gap_cal, freshness_prior_date,
+             created_at)
+        VALUES
+            (:trade_id, :ticker, :entry_date,
+             :freshness_category, :freshness_gap_td, :freshness_gap_cal, :freshness_prior_date,
+             datetime('now'))
+    """)
+    with engine.connect() as conn:
+        if trade_ids:
+            conn.execute(
+                text("DELETE FROM sp500_trade_freshness WHERE trade_id IN :ids"),
+                {"ids": tuple(trade_ids)},
+            )
+        conn.execute(insert_stmt, records)
+        conn.commit()
+
+    logger.info(
+        "S&P 500 freshness tagged: %d gap_computed | %d first_observed_high | %d insufficient_history",
+        counts["gap_computed"], counts["first_observed_high"], counts["insufficient_history"],
+    )
+    return {"total": len(trades), **counts}
+
+
+def load_freshness_df_sp500() -> pd.DataFrame:
+    """
+    Load closed sp500_52wh_v1 trades joined with freshness + sp500_market_regime regime.
+    Returns DataFrame with freshness_bucket column computed on-the-fly.
+    """
+    engine = get_engine()
+    try:
+        df = pd.read_sql(
+            """
+            SELECT t.id, t.ticker, t.entry_date, t.trade_year,
+                   t.return_pct, t.holding_days,
+                   r.gspc_regime, r.vix_tier,
+                   f.freshness_category,
+                   f.freshness_gap_td,
+                   f.freshness_gap_cal,
+                   f.freshness_prior_date
+            FROM trades t
+            JOIN sp500_trade_freshness f ON t.id = f.trade_id
+            LEFT JOIN sp500_market_regime r ON t.entry_date = r.date
+            WHERE t.strategy_version = 'sp500_52wh_v1'
+              AND t.source = 'backtest'
+              AND t.status = 'closed'
+              AND t.return_pct IS NOT NULL
+            ORDER BY t.entry_date
+            """,
+            engine,
+        )
+    except Exception as exc:
+        logger.warning("load_freshness_df_sp500 failed: %s", exc)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    df["freshness_bucket"] = df.apply(
+        lambda r: assign_bucket(r["freshness_category"], r.get("freshness_gap_td")),
+        axis=1,
+    )
+    return df

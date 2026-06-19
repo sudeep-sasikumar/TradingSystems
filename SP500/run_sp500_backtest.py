@@ -41,6 +41,11 @@ from backtest.engine import (
 )
 from backtest.regime import build_regime_table
 
+# freshness_tagger lives in 52WeekHigh/analysis/ — add 52WeekHigh to path
+_52WH = _HERE.parent / "52WeekHigh"
+if str(_52WH) not in sys.path:
+    sys.path.insert(0, str(_52WH))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -318,6 +323,46 @@ def checkpoint_regime() -> None:
     print(f"{_DIV}\n")
 
 
+# ════════════════════════════════════════════════════════════════════════════
+#  FRESHNESS FACTOR
+# ════════════════════════════════════════════════════════════════════════════
+
+def checkpoint_freshness() -> None:
+    logger.info(_DIV)
+    logger.info("FRESHNESS -- S&P 500 52-Week High Freshness Factor")
+    logger.info(_DIV)
+
+    from analysis.freshness_tagger import tag_freshness_sp500
+    summary = tag_freshness_sp500()
+    logger.info("Done: %s", summary)
+
+    total    = summary.get("total", 0)
+    gap      = summary.get("gap_computed", 0)
+    foh      = summary.get("first_observed_high", 0)
+    insuf    = summary.get("insufficient_history", 0)
+
+    print(f"\n{_DIV}")
+    print(f"  FRESHNESS COMPLETE -- sp500_52wh_v1")
+    print(_DIV)
+    print(f"  Total trades processed:   {total:>8,}")
+    print(f"  gap_computed:             {gap:>8,}  ({gap/total*100:.1f}%)" if total else "")
+    print(f"  first_observed_high:      {foh:>8,}  ({foh/total*100:.1f}%)" if total else "")
+    print(f"  insufficient_history:     {insuf:>8,}  ({insuf/total*100:.1f}%)" if total else "")
+    print(f"")
+    print(f"  Results written to: sp500_trade_freshness table in trading.db")
+    print(f"  View in: S&P 500 dashboard → Freshness Factor tab")
+    print(_DIV)
+    print()
+
+    if foh > 0:
+        print(
+            "  [!] first_observed_high caveat:\n"
+            "      S&P 500 price cache starts 2005-01-01 (~20 years of lookback).\n"
+            "      This category genuinely means no prior 52wk high was found\n"
+            "      in the 20-year window — a reliable long-base breakout signal.\n"
+        )
+
+
 # ── Formatting helpers ─────────────────────────────────────────────────────────
 
 def _fmt_int(row, col):
@@ -346,9 +391,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--checkpoint",
-        choices=["membership", "backtest", "regime"],
+        choices=["membership", "backtest", "regime", "freshness"],
         default="membership",
-        help="membership=CP-S2 (constituent history); backtest=CP-S3; regime=CP-S4",
+        help=(
+            "membership=CP-S2 (constituent history); backtest=CP-S3; "
+            "regime=CP-S4 (^GSPC + ^VIX); freshness=compute freshness factor "
+            "(run after backtest)"
+        ),
     )
     parser.add_argument(
         "--force-refresh",
@@ -363,6 +412,8 @@ def main() -> None:
         checkpoint_backtest(force_refresh=args.force_refresh)
     elif args.checkpoint == "regime":
         checkpoint_regime()
+    elif args.checkpoint == "freshness":
+        checkpoint_freshness()
 
 
 if __name__ == "__main__":

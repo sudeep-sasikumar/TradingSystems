@@ -26,9 +26,17 @@ import plotly.graph_objects as go
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(_ROOT))
+_52WH = _ROOT / "52WeekHigh"
+for _d in (str(_ROOT), str(_52WH)):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 
 from shared.db import get_engine
+from analysis.freshness_tagger import (
+    BUCKET_ORDER as FRESHNESS_BUCKET_ORDER,
+    assign_bucket as freshness_assign_bucket,
+    load_freshness_df_sp500,
+)
 
 SV_SP500 = "sp500_52wh_v1"
 SV_NIFTY = "52wh_v1"
@@ -390,6 +398,247 @@ def _compare_block(sp_s: dict, nifty_s: dict) -> None:
         nc.write(fmt.format(nifty_v) if nifty_v is not None else "—")
 
 
+_SP500_MIN_COUNT = 30
+
+_FRESHNESS_NUM_CFG = {
+    "Win%":     st.column_config.NumberColumn(format="%.1f%%"),
+    "Avg Ret%": st.column_config.NumberColumn(format="%.2f%%"),
+    "Median%":  st.column_config.NumberColumn(format="%.2f%%"),
+}
+
+
+def _freshness_stats(grp: pd.DataFrame) -> dict:
+    n = len(grp)
+    if n == 0:
+        return {"n": 0, "Win%": None, "Avg Ret%": None, "Median%": None, "Avg Days": None}
+    wins = (grp["return_pct"] > 0).sum()
+    return {
+        "n":        n,
+        "Win%":     round(wins / n * 100, 1),
+        "Avg Ret%": round(float(grp["return_pct"].mean()), 2),
+        "Median%":  round(float(grp["return_pct"].median()), 2),
+        "Avg Days": int(round(grp["holding_days"].mean())),
+    }
+
+
+def _render_sp500_freshness_tab() -> None:
+    """Freshness Factor sub-tab for the S&P 500 dashboard."""
+    st.markdown("#### Freshness Factor — Time Since Prior 52-Week High (S&P 500)")
+    st.caption(
+        "For each trade, measures the trading-day gap between the entry signal and the "
+        "previous time the same stock crossed its 252-day high, using only data strictly "
+        "before entry (no lookahead).  Requires `--checkpoint freshness` to be run after "
+        "the backtest."
+    )
+
+    try:
+        fresh_df = load_freshness_df_sp500()
+    except Exception as exc:
+        st.error(f"Could not load freshness data: {exc}")
+        return
+
+    if fresh_df.empty:
+        st.warning(
+            "No S&P 500 freshness data found.\n\n"
+            "Run:\n```\n"
+            "python SP500/run_sp500_backtest.py --checkpoint freshness\n"
+            "```\n\n"
+            "Or use **Setup & Admin → Step 9** in the dashboard."
+        )
+        return
+
+    # Coverage summary
+    cat_counts = fresh_df["freshness_category"].value_counts()
+    n_gap   = int(cat_counts.get("gap_computed", 0))
+    n_foh   = int(cat_counts.get("first_observed_high", 0))
+    n_insuf = int(cat_counts.get("insufficient_history", 0))
+
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    fc1.metric("Total Freshness-Tagged", f"{len(fresh_df):,}")
+    fc2.metric("Gap Computed",           f"{n_gap:,}")
+    fc3.metric("First Observed High",    f"{n_foh:,}")
+    fc4.metric("Insufficient History",   f"{n_insuf:,}")
+
+    st.info(
+        "**Lookback note (S&P 500):** price cache starts 2005-01-01 (~20 years of history).  "
+        "`first_observed_high` here genuinely means no prior 52-week high was found in the "
+        "20-year window — a reliable long-base breakout signal, unlike the Nifty 2022-present "
+        "dataset where the cache only goes back to 2021."
+    )
+
+    st.divider()
+
+    # ── Gap distribution ───────────────────────────────────────────────────────
+    gap_df = fresh_df[fresh_df["freshness_category"] == "gap_computed"]["freshness_gap_td"].dropna()
+    if len(gap_df) > 0:
+        st.markdown(f"#### Gap Distribution (trading days, n={len(gap_df):,} gap-computed trades)")
+
+        pcts = [0, 5, 10, 25, 50, 75, 90, 95, 100]
+        vals = [float(gap_df.quantile(p / 100)) for p in pcts]
+        pct_rows = [
+            {"Percentile": f"P{p}", "Gap (td)": int(round(v)),
+             "≈ Calendar": f"{round(int(round(v)) * 365 / 252)}d"}
+            for p, v in zip(pcts, vals)
+        ]
+        col_dist, col_hist = st.columns([1, 2])
+        with col_dist:
+            st.dataframe(pd.DataFrame(pct_rows), hide_index=True, use_container_width=True)
+        with col_hist:
+            clip_98 = float(gap_df.quantile(0.98))
+            hist_vals = gap_df.clip(upper=clip_98)
+            fig = go.Figure(go.Histogram(
+                x=hist_vals, nbinsx=40,
+                marker_color="#4a9edd",
+                marker_line=dict(width=0.5, color="rgba(0,0,0,0.3)"),
+            ))
+            for x, lbl in [(5, "1wk"), (22, "1m"), (130, "6m"), (252, "1yr"), (756, "3yr")]:
+                fig.add_vline(x=x, line_dash="dot", line_color="#aaa", annotation_text=lbl)
+            fig.update_layout(
+                title="Gap Distribution (clipped at P98)",
+                xaxis_title="Trading days since prior 52wh signal",
+                yaxis_title="Trades",
+                height=260, margin=dict(t=40, b=30, l=40, r=10),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Bucket breakdown ───────────────────────────────────────────────────────
+    st.markdown("#### Performance by Freshness Bucket")
+    st.caption(
+        "Buckets (trading days): < 1 wk = 1–4 · 1w–1m = 5–21 · 1–6m = 22–129 · "
+        "6–12m = 130–251 · 1–3yr = 252–755 · 3yr+ = 756+.  * = fewer than 30 trades."
+    )
+
+    bkt_rows = []
+    for bkt in FRESHNESS_BUCKET_ORDER:
+        grp = fresh_df[fresh_df["freshness_bucket"] == bkt]
+        if len(grp) == 0:
+            continue
+        s = _freshness_stats(grp)
+        bkt_rows.append({
+            "Freshness Bucket": bkt,
+            "n":        s["n"],
+            "Win%":     s["Win%"],
+            "Avg Ret%": s["Avg Ret%"],
+            "Median%":  s["Median%"],
+            "Avg Days": s["Avg Days"],
+            "Note":     "* n<30" if s["n"] < _SP500_MIN_COUNT else "",
+        })
+
+    if bkt_rows:
+        st.dataframe(pd.DataFrame(bkt_rows), hide_index=True, use_container_width=False,
+                     column_config=_FRESHNESS_NUM_CFG)
+
+        gap_rows = [r for r in bkt_rows
+                    if r["Freshness Bucket"] not in ("insufficient_history", "first_observed_high")]
+        if gap_rows:
+            fig2 = go.Figure(go.Bar(
+                x=[r["Freshness Bucket"] for r in gap_rows],
+                y=[r["Avg Ret%"] for r in gap_rows],
+                marker_color=["#2ecc71" if (r["Avg Ret%"] or 0) >= 0 else "#e74c3c" for r in gap_rows],
+                text=[f"{r['Avg Ret%']:+.1f}%" for r in gap_rows],
+                textposition="outside",
+            ))
+            fig2.update_layout(
+                title="Avg Return by Freshness Bucket (gap-computed trades)",
+                xaxis_title="Freshness bucket",
+                yaxis_title="Avg Return %",
+                height=300, margin=dict(t=50, b=10),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+    st.divider()
+
+    # ── first_observed_high vs rest ────────────────────────────────────────────
+    st.markdown("#### First Observed High vs All Other Trades")
+    st.caption(
+        "For S&P 500 (cache from 2005), this bucket reliably identifies stocks that had "
+        "not made a new 52-week high in the previous ~20 years of data — a genuine "
+        "long-base breakout. Compare to all other freshness buckets."
+    )
+
+    foh_grp  = fresh_df[fresh_df["freshness_bucket"] == "first_observed_high"]
+    rest_grp = fresh_df[fresh_df["freshness_bucket"] != "first_observed_high"]
+    comp_rows = []
+    for lbl, grp in [("first_observed_high", foh_grp),
+                     ("all other (gap known + insufficient)", rest_grp)]:
+        s = _freshness_stats(grp)
+        comp_rows.append({
+            "Group": lbl, "n": s["n"],
+            "Win%": s["Win%"], "Avg Ret%": s["Avg Ret%"],
+            "Median%": s["Median%"], "Avg Days": s["Avg Days"],
+            "Note": "* n<30" if s["n"] < _SP500_MIN_COUNT else "",
+        })
+    if comp_rows:
+        st.dataframe(pd.DataFrame(comp_rows), hide_index=True, use_container_width=False,
+                     column_config=_FRESHNESS_NUM_CFG)
+
+    st.divider()
+
+    # ── Freshness × regime cross-tab (^GSPC 200-DMA) ──────────────────────────
+    st.markdown("#### Freshness × ^GSPC Regime Cross-Tab")
+    st.caption(
+        "Does freshness add information WITHIN a single regime bucket?  "
+        "If the avg-return spread across freshness buckets is < 5pp within a regime, "
+        "freshness is redundant with regime.  A consistent spread > 10pp suggests "
+        "an independent signal."
+    )
+
+    gap_only = fresh_df[fresh_df["freshness_category"] == "gap_computed"]
+
+    for regime_val, regime_label in [("bull", "^GSPC BULL (above 200-DMA)"),
+                                      ("bear", "^GSPC BEAR (below 200-DMA)")]:
+        regime_grp = gap_only[gap_only["gspc_regime"] == regime_val]
+        if len(regime_grp) < 5:
+            continue
+        bl = _freshness_stats(regime_grp)
+        st.markdown(
+            f"**{regime_label}** — {bl['n']} trades · "
+            f"baseline avg {bl['Avg Ret%']:+.2f}% · win {bl['Win%']:.1f}%"
+        )
+        xt_rows = []
+        for bkt in FRESHNESS_BUCKET_ORDER:
+            if bkt in ("insufficient_history", "first_observed_high"):
+                continue
+            grp = regime_grp[regime_grp["freshness_bucket"] == bkt]
+            s = _freshness_stats(grp)
+            if s["n"] < 5:
+                continue
+            delta = round((s["Avg Ret%"] or 0) - (bl["Avg Ret%"] or 0), 2)
+            xt_rows.append({
+                "Freshness Bucket": bkt,
+                "n":          s["n"],
+                "Win%":       s["Win%"],
+                "Avg Ret%":   s["Avg Ret%"],
+                "vs baseline": f"{delta:+.2f}%",
+                "Note":       "* n<30" if s["n"] < _SP500_MIN_COUNT else "",
+            })
+        if xt_rows:
+            st.dataframe(pd.DataFrame(xt_rows), hide_index=True, use_container_width=False,
+                         column_config={
+                             "Win%":     st.column_config.NumberColumn(format="%.1f%%"),
+                             "Avg Ret%": st.column_config.NumberColumn(format="%.2f%%"),
+                         })
+
+    with st.expander("How to interpret this analysis"):
+        st.markdown(
+            """
+**Redundant with regime:** freshness is a regime proxy if short-gap trades cluster in
+bull conditions and long-gap trades cluster in bear conditions.  Controlling for regime
+then removes most of the freshness effect.
+
+**Independent signal:** freshness adds value if, within a fixed ^GSPC regime bucket,
+the freshness breakdown shows a consistent performance split (> 10pp avg-return spread,
+same direction in multiple years, ≥ 30 trades per cell).
+
+**S&P 500 vs Nifty:** the S&P 500 price cache starts 2005-01-01, giving a much longer
+lookback than the Nifty 2022-present dataset.  `first_observed_high` here is genuinely
+meaningful — it represents stocks that hadn't crossed their 252-day high in ~20 years.
+            """
+        )
+
+
 # ── Main render ────────────────────────────────────────────────────────────────
 
 def render_tab() -> None:
@@ -427,11 +676,12 @@ def render_tab() -> None:
     st.divider()
 
     # ── Sub-tabs ───────────────────────────────────────────────────────────────
-    backtest_tab, regime_tab, delist_tab, compare_tab = st.tabs([
+    backtest_tab, regime_tab, delist_tab, compare_tab, freshness_tab = st.tabs([
         "Backtest Results",
         "Regime Analysis",
         "Delisted Exits",
         "vs Nifty 500",
+        "Freshness Factor",
     ])
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -859,3 +1109,9 @@ def render_tab() -> None:
             "A direct performance comparison requires currency adjustment and a "
             "matched time window — the overlap panel above is the closest proxy."
         )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB 5 — FRESHNESS FACTOR
+    # ═══════════════════════════════════════════════════════════════════════════
+    with freshness_tab:
+        _render_sp500_freshness_tab()
