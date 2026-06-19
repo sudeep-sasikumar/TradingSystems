@@ -7,10 +7,10 @@
 ## Current State
 
 - **Date last updated**: 2026-06-19
-- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete) + Freshness analysis (complete)
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5, CP-S6, CP-S7 + Freshness Factor
-- **Next action (VPS)**: git pull → docker compose up --build -d (adds sp500_scanner service; rebuilds bot + dashboard)
-- **Next build**: None currently scheduled — run --checkpoint freshness locally to populate freshness columns
+- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete) + Freshness analysis (Nifty + S&P 500 complete)
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5, CP-S6, CP-S7 + Freshness (Nifty + SP500)
+- **Next action (VPS)**: git pull → docker compose up --build -d → click "Run Everything (Steps 1–9)" in Setup & Admin tab
+- **Setup button**: Steps 1-9 in Setup & Admin tab — runs all Nifty + S&P 500 backtests, regime tags, and freshness in one click (~100-165 min)
 
 ---
 
@@ -575,6 +575,38 @@ python 52WeekHigh/run_regime_analysis.py --checkpoint freshness --strategy-versi
 # Full printed analysis:
 python 52WeekHigh/run_regime_analysis.py --checkpoint freshness-analyze
 ```
+
+---
+
+### ✅ S&P 500 Freshness Factor + Full Setup Button (complete, 2026-06-19)
+
+**Goal**: Mirror Nifty freshness analysis for the S&P 500 backtest; add a single "Run Everything"
+button in Setup & Admin that populates all data in the correct order for a fresh VPS deployment.
+
+**S&P 500 freshness storage**:
+- New `Sp500TradeFreshness` table (`sp500_trade_freshness`) with FK to trades.
+  S&P 500 has no `trade_regime_tags` equivalent, so this is a standalone table.
+- Populated by `tag_freshness_sp500()` using DELETE+INSERT (safe to re-run).
+- Loads regime data from `sp500_market_regime` for the cross-tab (LEFT JOIN).
+
+**Key S&P 500 vs Nifty lookback difference**:
+- S&P 500 price cache starts 2005-01-01 (~20 year lookback).
+- `first_observed_high` for S&P 500 genuinely means no prior 52-week high in 20 years —
+  a reliable long-base breakout indicator.  Much more trustworthy than the Nifty 2022-present
+  dataset (cache from 2021).
+
+**Files changed:**
+- `shared/models.py`: `Sp500TradeFreshness` table
+- `52WeekHigh/analysis/freshness_tagger.py`: `sp500_52wh_v1` in `_CACHE_DIRS`,
+  `tag_freshness_sp500()`, `load_freshness_df_sp500()`
+- `SP500/run_sp500_backtest.py`: `--checkpoint freshness`
+- `dashboard/tabs/tab_sp500.py`: "Freshness Factor" 5th sub-tab
+- `dashboard/tabs/tab_setup.py`: Steps 8 + 9 (freshness buttons), "Run Everything (Steps 1–9)"
+  primary button, updated DB status metrics (freshness row counts), contextual hints
+
+**To populate on VPS (after git pull + docker compose up --build -d):**
+Open dashboard → Setup & Admin → click **"Run Everything (Steps 1–9)"**
+Or run the individual CLI commands shown in the Advanced section.
 
 ---
 
