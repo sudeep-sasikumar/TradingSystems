@@ -6,10 +6,11 @@
 
 ## Current State
 
-- **Date last updated**: 2026-06-18
-- **Active phase**: Phase 1 — 52-Week High Momentum Strategy
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c (VPS deployment fix)
-- **Next action**: SSH into VPS → git pull → docker compose up --build -d → open Setup & Admin tab → Run All Steps
+- **Date last updated**: 2026-06-19
+- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S4 complete)
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4
+- **Next action (VPS)**: git pull → docker compose up --build -d → Setup & Admin → Step 6 (S&P 500 Regime, ~1-2 min)
+- **Next build**: CP-S5 — S&P 500 daily scanner (fires at 4PM ET, sends "[S&P500]" Telegram alerts)
 
 ---
 
@@ -364,9 +365,53 @@ docker run --rm -v trading_data:/from -v $(pwd)/data:/to alpine sh -c "cp -r /fr
 
 ---
 
+---
+
+### ✅ CP-S1 — S&P 500 Research (complete, previous session)
+Time-varying membership sourced from fja05680/sp500 (GitHub, Wikipedia-sourced change history).
+Two files: `sp500_ticker_start_end.csv` (1,202 unique tickers, 1996–2026-06-02) and
+`sp500_changes_since_2019.csv` (event log). COVERAGE_START = 2006-01-01, LOOKBACK_START = 2005-01-01.
+
+---
+
+### ✅ CP-S2 — S&P 500 Constituent Ingestion (complete, previous session)
+`shared/models.py`: added `Sp500Membership` table.
+`SP500/backtest/universe.py`: downloads + parses both fja05680 CSVs, merges, persists.
+1,255 membership intervals, 1,202 unique tickers, 503 current members.
+CLI: `python SP500/run_sp500_backtest.py --checkpoint membership`
+
+---
+
+### ✅ CP-S3 — S&P 500 Backtest (complete, previous session)
+`SP500/backtest/engine.py`: full simulation with time-varying membership + delisting detection.
+`SP500/run_sp500_backtest.py`: CLI entry point.
+Results on VPS (per user-provided CSV): 3,707 total (3,460 closed + 247 open), 46.2% win rate,
+avg return +13.66% per closed trade, top winner V +741% (2011-2020).
+`dashboard/tabs/tab_sp500.py`: new S&P 500 tab (Backtest Results / Delisted Exits / vs Nifty 500).
+`dashboard/app.py`: 5-tab layout (Nifty Live / Nifty Historic / Nifty Regime / S&P 500 / Setup).
+
+---
+
+### ✅ CP-S4 — S&P 500 Regime Analysis (complete, 2026-06-19)
+`shared/models.py`: added `Sp500MarketRegime` table (daily ^GSPC + ^VIX regime signals).
+`SP500/backtest/regime.py`: downloads ^GSPC + ^VIX from 2004-06-01, computes 200-DMA regime
+  (bull/bear) and VIX tier (calm/elevated/stressed), saves 5,146 rows to sp500_market_regime.
+`SP500/run_sp500_backtest.py`: added `--checkpoint regime` (CP-S4).
+`dashboard/tabs/tab_sp500.py`: new "Regime Analysis" 4th sub-tab with:
+  - 200-DMA breakdown table + win rate / avg return bar charts
+  - VIX tier breakdown table + bar charts
+  - Combined 200-DMA × VIX matrix (trades | win% | avg%)
+  - ^GSPC vs 200-DMA price chart with bear shading
+  - ^VIX history chart with tier threshold lines
+`dashboard/tabs/tab_setup.py`: Step 6 button for S&P 500 regime; SP500 Regime Days metric.
+
+**VPS: Run Setup & Admin → Step 6 (< 2 min) to populate regime data.**
+
+---
+
 ## Open Questions / Pending Decisions
 
-None — all design questions confirmed as of 2026-06-18.
+None — all design questions confirmed as of 2026-06-19.
 
 ---
 
