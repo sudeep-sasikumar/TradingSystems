@@ -134,12 +134,20 @@ def render_tab() -> None:
         "**Est. runtime:** 45–90 min on first run  \n"
         "⚠️  Keep this browser tab open — the process runs synchronously."
     )
-    if st.button("▶  Run S&P 500 Backtest", key="btn_sp500_backtest"):
-        _run_step(
-            label="S&P 500 Backtest 2006-present (CP-S3)",
-            cmd=[_PY, _RUN_SP500, "--checkpoint", "backtest"],
-            timeout=9000,
+    if st.button("▶  Run S&P 500 Backtest (Steps 4 + 5)", key="btn_sp500_backtest"):
+        st.markdown("**5a — Building membership table (fast, < 1 min)**")
+        ok = _run_step(
+            label="S&P 500 Membership (CP-S2)",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "membership"],
+            timeout=120,
         )
+        if ok:
+            st.markdown("**5b — Running backtest (45–90 min on first run)**")
+            _run_step(
+                label="S&P 500 Backtest 2006-present (CP-S3)",
+                cmd=[_PY, _RUN_SP500, "--checkpoint", "backtest"],
+                timeout=9000,
+            )
         st.info("Done — click **Refresh Status** to see updated trade counts.")
 
     st.divider()

@@ -92,11 +92,18 @@ def checkpoint_backtest(force_refresh: bool = False) -> None:
     logger.info("CP-S3 -- S&P 500 52-Week High Backtest")
     logger.info(_DIV)
 
-    # ── 1. Universe from DB ────────────────────────────────────────────────
+    # ── 1. Universe from DB (auto-populate if empty) ───────────────────────
     tickers = get_backtest_tickers()
     if not tickers:
+        logger.info(
+            "sp500_membership table is empty — running membership ingestion first ..."
+        )
+        checkpoint_membership(force_refresh=force_refresh)
+        tickers = get_backtest_tickers()
+    if not tickers:
         logger.error(
-            "sp500_membership table is empty. Run --checkpoint membership first."
+            "sp500_membership is still empty after ingestion attempt. "
+            "Check network connectivity to GitHub and retry."
         )
         sys.exit(1)
 
