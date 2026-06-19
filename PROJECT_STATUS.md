@@ -7,10 +7,10 @@
 ## Current State
 
 - **Date last updated**: 2026-06-19
-- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S4 complete)
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4
-- **Next action (VPS)**: git pull → docker compose up --build -d → Setup & Admin → Step 6 (S&P 500 Regime, ~1-2 min)
-- **Next build**: CP-S5 — S&P 500 daily scanner (fires at 4PM ET, sends "[S&P500]" Telegram alerts)
+- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S5 complete)
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5
+- **Next action (VPS)**: git pull → docker compose up --build -d (rebuilds bot with SP500 support, adds sp500_scanner service)
+- **Next build**: CP-S6 — regime-enhanced S&P 500 scanner (conviction tiers calibrated from CP-S4 data)
 
 ---
 
@@ -406,6 +406,43 @@ avg return +13.66% per closed trade, top winner V +741% (2011-2020).
 `dashboard/tabs/tab_setup.py`: Step 6 button for S&P 500 regime; SP500 Regime Days metric.
 
 **VPS: Run Setup & Admin → Step 6 (< 2 min) to populate regime data.**
+
+---
+
+---
+
+### ✅ CP-S5 — S&P 500 Daily EOD Scanner (complete, 2026-06-19)
+
+**Files created:**
+- `SP500/scanner/__init__.py` — package marker
+- `SP500/scanner/scanner.py` — S&P 500 EOD daily scanner
+
+**Files modified:**
+- `52WeekHigh/bot/bot.py` — extended to handle both Nifty (52wh_v1) and S&P 500 (sp500_52wh_v1) signals
+- `dashboard/tabs/tab_setup.py` — Step 7 test button + SP500 live metrics
+
+**Scanner behavior:**
+- Fires at **21:30 UTC Mon–Fri** (5:30 PM EDT / 4:30 PM EST)
+- Universe: current S&P 500 members from `sp500_membership` (503 tickers)
+- Signal: today's close > 252-day rolling max of prior closes (close-based only, always `eod_confirmed`)
+- Price cache: `data/cache/prices_sp500_live/` (TTL 23h, downloads from 2024-01-01)
+- Env: `SP500_MAX_CONCURRENT_POSITIONS` (default: 20)
+- CLI: `python SP500/scanner/scanner.py --run-now` for immediate test
+
+**Bot changes (strategy-aware, Nifty behavior unchanged):**
+- `_fmt_signal()`: S&P 500 gets `[S&P500]` prefix and `$` currency; Nifty stays `₹`
+- `_accept_signal()`: uses `sig.strategy_version` (was hard-coded to `52wh_v1`)
+- `_job_poll_signals/exits/expiry`: handle all strategy versions
+- `/positions` command: shows both Nifty (INR) and S&P 500 (USD) positions
+- `_job_eod_summary`: shows signal counts for both strategies
+
+**Flow:** Scanner writes `Signal(strategy_version='sp500_52wh_v1', status='pending')` to DB
+→ Bot polls every 60s, sends Telegram with `[S&P500]` prefix and Accept/Reject buttons
+→ Accept creates `Trade(strategy_version='sp500_52wh_v1', source='live')`
+→ Scanner checks trailing stops at next 21:30 UTC run
+
+**VPS deployment note:** The `sp500_scanner` Docker service is NOT yet in `docker-compose.yml`
+(that's CP-S7). For now, test via Setup & Admin → Step 7 or CLI `--run-now`.
 
 ---
 
