@@ -21,6 +21,7 @@ import streamlit as st
 from tabs.tab_52wh import render_tab as render_52wh
 from tabs.tab_52wh_historic import render_tab as render_52wh_historic
 from tabs.tab_regime import render_tab as render_regime
+from tabs.tab_sp500 import render_tab as render_sp500
 from tabs.tab_setup import render_tab as render_setup
 
 st.set_page_config(
@@ -30,12 +31,13 @@ st.set_page_config(
 )
 
 st.title("TradingSystems Dashboard")
-st.caption("Phase 1 — 52-Week High Momentum Strategy | NSE / Nifty 500")
+st.caption("52-Week High Momentum Strategy | NSE Nifty 500 + S&P 500")
 
 tabs = st.tabs([
-    "52-Week High (Live)",
-    "52-Week High (Historic, Survivorship-Corrected)",
-    "Regime Analysis",
+    "Nifty 500 — Live",
+    "Nifty 500 — Historic",
+    "Nifty 500 — Regime Analysis",
+    "S&P 500",
     "Setup & Admin",
 ])
 
@@ -49,4 +51,7 @@ with tabs[2]:
     render_regime()
 
 with tabs[3]:
+    render_sp500()
+
+with tabs[4]:
     render_setup()
