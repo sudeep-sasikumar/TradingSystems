@@ -24,6 +24,7 @@ _RUN_BACKTEST   = str(_ROOT / "52WeekHigh" / "run_backtest.py")
 _RUN_HISTORIC   = str(_ROOT / "52WeekHigh" / "run_historic_backtest.py")
 _RUN_REGIME     = str(_ROOT / "52WeekHigh" / "run_regime_analysis.py")
 _RUN_SP500      = str(_ROOT / "SP500" / "run_sp500_backtest.py")
+_RUN_SP500_SCAN = str(_ROOT / "SP500" / "scanner" / "scanner.py")
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
@@ -171,6 +172,25 @@ def render_tab() -> None:
 
     st.divider()
 
+    # ── Step 7 — SP500 scanner test run ───────────────────────────────────────
+    st.subheader("Step 7 — S&P 500 Scanner Test Run (CP-S5)")
+    st.markdown(
+        "Runs the S&P 500 EOD scanner **immediately** (bypasses the 21:30 UTC schedule).  \n"
+        "Downloads today's prices for current S&P 500 members, detects new 52-week highs, "
+        "and fires Telegram alerts via the bot.  \n"
+        "The scanner normally runs automatically at **21:30 UTC Mon–Fri** (see Docker section).  \n"
+        "⚠️  Only run this after US market close \\(after 9 PM UTC\\) to see today's close prices\\."
+    )
+    if st.button("▶  Test S&P 500 Scanner (--run-now)", key="btn_sp500_scan_test"):
+        _run_step(
+            label="S&P 500 Scanner test run (CP-S5)",
+            cmd=[_PY, _RUN_SP500_SCAN, "--run-now"],
+            timeout=900,
+        )
+        st.info("Done — any new signals will appear in Telegram within 60 seconds.")
+
+    st.divider()
+
     # ── Run All ────────────────────────────────────────────────────────────────
     st.subheader("Run All Steps (1 → 2 → 3 → 4 → 5 → 6)")
     st.warning(
@@ -283,12 +303,16 @@ def _db_status() -> None:
     c6.metric("Nifty Membership",    f"{n_membership:,}", help="Point-in-time Nifty 500 membership intervals")
 
     n_sp500_regime = _q("SELECT COUNT(*) FROM sp500_market_regime")
+    n_sp500_live   = _q("SELECT COUNT(*) FROM trades WHERE strategy_version='sp500_52wh_v1' AND source='live'")
+    n_sp500_pend   = _q("SELECT COUNT(*) FROM signals WHERE strategy_version='sp500_52wh_v1' AND status='pending'")
 
     st.markdown("**S&P 500 (US)**")
-    d1, d2, d3 = st.columns(3)
-    d1.metric("SP500 Membership Rows",  f"{n_sp500_member:,}", help="Historical constituent intervals (sp500_membership)")
-    d2.metric("SP500 Backtest Trades",  f"{n_sp500_trades:,}", help="strategy_version=sp500_52wh_v1, source=backtest")
-    d3.metric("SP500 Regime Days",      f"{n_sp500_regime:,}", help="Trading days in sp500_market_regime (^GSPC 200-DMA + VIX)")
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("SP500 Membership",    f"{n_sp500_member:,}", help="Historical constituent intervals")
+    d2.metric("SP500 Backtest",      f"{n_sp500_trades:,}", help="strategy_version=sp500_52wh_v1, source=backtest")
+    d3.metric("SP500 Regime Days",   f"{n_sp500_regime:,}", help="^GSPC 200-DMA + VIX daily rows")
+    d4.metric("SP500 Live Trades",   f"{n_sp500_live:,}",   help="Open + closed live trades")
+    d5.metric("SP500 Pending Sigs",  f"{n_sp500_pend:,}",   help="Pending S&P 500 signals (awaiting Accept/Reject)")
 
     nifty_checks = {
         "Nifty original backtest":  n_orig > 500,
@@ -393,6 +417,20 @@ docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint ba
 
 # Step 6: S&P 500 regime analysis (~1-2 min, downloads ^GSPC + ^VIX)
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint regime
+
+# Step 7: S&P 500 scanner test run (run after US market close)
+docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
+```
+
+**S&P 500 scanner continuous service (runs in `sp500_scanner` Docker container):**
+```bash
+# The sp500_scanner service fires at 21:30 UTC Mon-Fri automatically.
+# Check it's running:
+docker compose ps sp500_scanner
+docker compose logs -f sp500_scanner
+
+# Restart if needed:
+docker compose restart sp500_scanner
 ```
 
 **Force re-download all price data (clears cache):**

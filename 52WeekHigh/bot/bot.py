@@ -75,7 +75,9 @@ logger = logging.getLogger("bot")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 IST               = pytz.timezone("Asia/Kolkata")
-STRATEGY_VERSION  = "52wh_v1"
+STRATEGY_VERSION  = "52wh_v1"          # Nifty (used for Nifty-specific queries)
+SV_SP500          = "sp500_52wh_v1"    # S&P 500
+_ALL_SVS          = (STRATEGY_VERSION, SV_SP500)   # all handled strategy versions
 SIGNAL_EXPIRY_H   = 24         # hours before a pending signal is auto-expired
 _UTC              = timezone.utc
 
@@ -152,6 +154,9 @@ def _fmt_conviction(row: pd.Series) -> str:
 
 
 def _fmt_signal(row: pd.Series) -> str:
+    sv       = str(row.get("strategy_version", STRATEGY_VERSION))
+    is_sp500 = sv == SV_SP500
+
     ticker   = _esc(row["ticker"])
     company  = _esc(row.get("company_name", ""))
     price    = float(row["signal_price"])
@@ -162,8 +167,8 @@ def _fmt_signal(row: pd.Series) -> str:
     cap      = int(row.get("cap_at_signal") or 0)
     sig_type = str(row.get("signal_type", "intraday_provisional"))
     type_lbl = {
-        "intraday_provisional": "Provisional",
-        "eod_confirmed":        "EOD Confirmed",
+        "intraday_provisional":    "Provisional",
+        "eod_confirmed":           "EOD Confirmed",
         "provisional_unconfirmed": "Provisional \\(Unconfirmed\\)",
     }.get(sig_type, _esc(sig_type.replace("_", " ").title()))
 
@@ -173,8 +178,21 @@ def _fmt_signal(row: pd.Series) -> str:
         else ""
     )
 
-    conviction_note = _fmt_conviction(row)
+    if is_sp500:
+        price_str = f"\\${_esc(f'{price:.2f}')}"
+        bm_str    = f"\\${_esc(f'{bm:.2f}')}"
+        return (
+            f"*\\[S&P500\\] 52\\-Week High Signal*\n\n"
+            f"*{ticker}* — {company}\n"
+            f"Signal price: {price_str} — _actual fill price may differ\\._\n"
+            f"Above 252\\-day high: {bm_str} \\(\\+{_esc(f'{pct:.2f}')}%\\)\n"
+            f"Type: {type_lbl}\n\n"
+            f"_Detected: {_esc(ts)} UTC_"
+            f"{cap_note}"
+        )
 
+    # Nifty format (unchanged)
+    conviction_note = _fmt_conviction(row)
     return (
         f"*52\\-Week High Signal*\n\n"
         f"*{ticker}* — {company}\n"
@@ -205,6 +223,11 @@ def _fmt_eod_update(row: pd.Series) -> str:
 
 
 def _fmt_exit(row: pd.Series) -> str:
+    sv       = str(row.get("strategy_version", STRATEGY_VERSION))
+    is_sp500 = sv == SV_SP500
+    cur      = "\\$" if is_sp500 else "₹"
+    prefix   = "\\[S&P500\\] " if is_sp500 else ""
+
     ticker   = _esc(row["ticker"])
     company  = _esc(row.get("company_name", ""))
     entry_p  = float(row.get("entry_price", 0) or 0)
@@ -216,21 +239,26 @@ def _fmt_exit(row: pd.Series) -> str:
     sign = "\\+" if ret_pct >= 0 else ""
 
     return (
-        f"🔴 *Trailing Stop Exit* — *{ticker}* {company}\n"
-        f"Exit: ₹{_esc(f'{exit_p:.2f}')} \\(stop was ₹{_esc(f'{stop_val:.2f}')}\\)\n"
-        f"Entry: ₹{_esc(f'{entry_p:.2f}')}\n"
+        f"🔴 *{prefix}Trailing Stop Exit* — *{ticker}* {company}\n"
+        f"Exit: {cur}{_esc(f'{exit_p:.2f}')} \\(stop was {cur}{_esc(f'{stop_val:.2f}')}\\)\n"
+        f"Entry: {cur}{_esc(f'{entry_p:.2f}')}\n"
         f"Return: {sign}{_esc(f'{ret_pct:.2f}')}% over {hold_d} days"
     )
 
 
 def _fmt_expiry(row: pd.Series) -> str:
+    sv       = str(row.get("strategy_version", STRATEGY_VERSION))
+    is_sp500 = sv == SV_SP500
+    cur      = "\\$" if is_sp500 else "₹"
+    prefix   = "\\[S&P500\\] " if is_sp500 else ""
+
     ticker  = _esc(row["ticker"])
     company = _esc(row.get("company_name", ""))
     price   = float(row.get("signal_price", 0) or 0)
     return (
-        f"⏰ *Signal Expired* — *{ticker}* {company}\n"
+        f"⏰ *{prefix}Signal Expired* — *{ticker}* {company}\n"
         f"No action taken within 24h\\. "
-        f"Signal price was ₹{_esc(f'{price:.2f}')}\\. "
+        f"Signal price was {cur}{_esc(f'{price:.2f}')}\\. "
         f"Stock remains eligible for future signals\\."
     )
 
@@ -272,7 +300,7 @@ def _accept_signal(sig_id: int) -> Optional[str]:
             trailing_stop          = round(sig.signal_price * 0.80, 2),
             status                 = "open",
             trade_year             = date.today().year,
-            strategy_version       = STRATEGY_VERSION,
+            strategy_version       = sig.strategy_version,  # preserve signal's strategy_version
         )
         sess.add(trade)
         return sig.ticker
@@ -350,9 +378,9 @@ async def _job_poll_signals(context: ContextTypes.DEFAULT_TYPE) -> None:
         df = pd.read_sql(
             "SELECT * FROM signals "
             "WHERE telegram_message_id IS NULL AND status='pending' "
-            "AND strategy_version=:v "
+            "AND strategy_version IN ('52wh_v1', 'sp500_52wh_v1') "
             "ORDER BY id ASC",
-            engine, params={"v": STRATEGY_VERSION},
+            engine,
         )
     except Exception as exc:
         logger.error("poll_signals: DB read failed: %s", exc)
@@ -423,8 +451,8 @@ async def _job_poll_exits(context: ContextTypes.DEFAULT_TYPE) -> None:
         df = pd.read_sql(
             "SELECT * FROM trades "
             "WHERE source='live' AND status='closed' AND exit_notified=0 "
-            "AND strategy_version=:v",
-            engine, params={"v": STRATEGY_VERSION},
+            "AND strategy_version IN ('52wh_v1', 'sp500_52wh_v1')",
+            engine,
         )
     except Exception as exc:
         logger.error("poll_exits: DB read failed: %s", exc)
@@ -457,8 +485,8 @@ async def _job_poll_expiry(context: ContextTypes.DEFAULT_TYPE) -> None:
         df = pd.read_sql(
             "SELECT * FROM signals "
             "WHERE status='pending' AND created_at <= :cutoff "
-            "AND strategy_version=:v",
-            engine, params={"cutoff": cutoff, "v": STRATEGY_VERSION},
+            "AND strategy_version IN ('52wh_v1', 'sp500_52wh_v1')",
+            engine, params={"cutoff": cutoff},
         )
     except Exception as exc:
         logger.error("poll_expiry: DB read failed: %s", exc)
@@ -499,47 +527,68 @@ async def _job_eod_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
             "WHERE signal_date=:d AND strategy_version=:v GROUP BY status",
             engine, params={"d": today, "v": STRATEGY_VERSION},
         )
-        open_trades = pd.read_sql(
+        sp500_sigs = pd.read_sql(
+            "SELECT status, COUNT(*) AS n FROM signals "
+            "WHERE signal_date=:d AND strategy_version=:v GROUP BY status",
+            engine, params={"d": today, "v": SV_SP500},
+        )
+        open_nifty = pd.read_sql(
             "SELECT ticker, entry_price, trailing_stop, highest_price_reached "
             "FROM trades WHERE source='live' AND status='open' AND strategy_version=:v "
             "ORDER BY entry_price DESC",
             engine, params={"v": STRATEGY_VERSION},
         )
+        open_sp500 = pd.read_sql(
+            "SELECT ticker, entry_price, trailing_stop, highest_price_reached "
+            "FROM trades WHERE source='live' AND status='open' AND strategy_version=:v "
+            "ORDER BY entry_price DESC",
+            engine, params={"v": SV_SP500},
+        )
         exits_today = pd.read_sql(
             "SELECT COUNT(*) AS n FROM trades "
-            "WHERE source='live' AND status='closed' AND exit_date=:d AND strategy_version=:v",
-            engine, params={"d": today, "v": STRATEGY_VERSION},
+            "WHERE source='live' AND status='closed' AND exit_date=:d",
+            engine, params={"d": today},
         )
     except Exception as exc:
         logger.error("eod_summary: DB read failed: %s", exc)
         return
 
-    sig_counts = {r["status"]: int(r["n"]) for _, r in sigs.iterrows()}
-    n_today    = sum(sig_counts.values())
-    n_accepted = sig_counts.get("accepted", 0)
-    n_rejected = sig_counts.get("rejected", 0)
-    n_expired  = sig_counts.get("expired",  0)
-    n_open     = len(open_trades)
-    n_exits    = int(exits_today["n"].iloc[0]) if not exits_today.empty else 0
+    def _sig_counts(df):
+        return {r["status"]: int(r["n"]) for _, r in df.iterrows()}
 
-    today_esc  = _esc(today)
+    nc = _sig_counts(sigs)
+    sc = _sig_counts(sp500_sigs)
+    n_exits = int(exits_today["n"].iloc[0]) if not exits_today.empty else 0
+    today_esc = _esc(today)
 
     lines = [
         f"📊 *Daily Summary — {today_esc}*\n",
-        f"Signals today: {n_today} "
-        f"\\(✅ {n_accepted} accepted \\| ❌ {n_rejected} rejected \\| ⏰ {n_expired} expired\\)",
-        f"Open positions: {n_open}",
-        f"Exits today: {n_exits}",
+        f"*Nifty 500* signals today: {sum(nc.values())} "
+        f"\\(✅ {nc.get('accepted',0)} \\| ❌ {nc.get('rejected',0)} \\| ⏰ {nc.get('expired',0)}\\)",
+        f"*S&P 500* signals today: {sum(sc.values())} "
+        f"\\(✅ {sc.get('accepted',0)} \\| ❌ {sc.get('rejected',0)} \\| ⏰ {sc.get('expired',0)}\\)",
+        f"Open positions: Nifty {len(open_nifty)} \\| S&P 500 {len(open_sp500)}",
+        f"Exits today \\(all strategies\\): {n_exits}",
     ]
 
-    if not open_trades.empty:
-        lines.append("\n*Open Positions \\(trailing stops\\):*")
-        for _, r in open_trades.iterrows():
+    open_trades = open_nifty
+    if not open_nifty.empty:
+        lines.append("\n*Nifty Open Positions \\(trailing stops\\):*")
+        for _, r in open_nifty.iterrows():
             tk   = _esc(r["ticker"])
             ep   = _esc(f"{float(r['entry_price']):.2f}")
             ts   = _esc(f"{float(r['trailing_stop']):.2f}")
             hp   = _esc(f"{float(r['highest_price_reached']):.2f}")
             lines.append(f"  • *{tk}* — entry ₹{ep} \\| high ₹{hp} \\| stop ₹{ts}")
+
+    if not open_sp500.empty:
+        lines.append("\n*S&P 500 Open Positions \\(trailing stops\\):*")
+        for _, r in open_sp500.iterrows():
+            tk   = _esc(r["ticker"])
+            ep   = _esc(f"{float(r['entry_price']):.2f}")
+            ts   = _esc(f"{float(r['trailing_stop']):.2f}")
+            hp   = _esc(f"{float(r['highest_price_reached']):.2f}")
+            lines.append(f"  • *{tk}* — entry \\${ep} \\| high \\${hp} \\| stop \\${ts}")
 
     try:
         await context.bot.send_message(
@@ -637,15 +686,15 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """List all open live positions with trailing stops."""
+    """List all open live positions with trailing stops (Nifty + S&P 500)."""
     engine = get_engine()
     try:
         df = pd.read_sql(
             "SELECT ticker, company_name, entry_date, entry_price, "
-            "highest_price_reached, trailing_stop FROM trades "
-            "WHERE source='live' AND status='open' AND strategy_version=:v "
-            "ORDER BY entry_date DESC",
-            engine, params={"v": STRATEGY_VERSION},
+            "highest_price_reached, trailing_stop, strategy_version FROM trades "
+            "WHERE source='live' AND status='open' "
+            "ORDER BY strategy_version, entry_date DESC",
+            engine,
         )
     except Exception:
         await update.message.reply_text("Error reading database.")
@@ -655,14 +704,31 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("No open positions.")
         return
 
-    lines = ["*Open Positions*\n"]
-    for _, r in df.iterrows():
-        tk  = _esc(r["ticker"])
-        dt  = _esc(str(r["entry_date"]))
-        ep  = _esc(f"{float(r['entry_price']):.2f}")
-        hp  = _esc(f"{float(r['highest_price_reached']):.2f}")
-        ts  = _esc(f"{float(r['trailing_stop']):.2f}")
-        lines.append(f"*{tk}* \\(entry {dt}\\)\n  ₹{ep} → high ₹{hp} \\| stop ₹{ts}")
+    nifty_df  = df[df["strategy_version"] == STRATEGY_VERSION]
+    sp500_df  = df[df["strategy_version"] == SV_SP500]
+    lines     = ["*Open Positions*\n"]
+
+    if not nifty_df.empty:
+        lines.append("*Nifty 500 \\(INR\\):*")
+        for _, r in nifty_df.iterrows():
+            tk  = _esc(r["ticker"])
+            dt  = _esc(str(r["entry_date"]))
+            ep  = _esc(f"{float(r['entry_price']):.2f}")
+            hp  = _esc(f"{float(r['highest_price_reached']):.2f}")
+            ts  = _esc(f"{float(r['trailing_stop']):.2f}")
+            lines.append(f"*{tk}* \\(entry {dt}\\)\n  ₹{ep} → high ₹{hp} \\| stop ₹{ts}")
+
+    if not sp500_df.empty:
+        if not nifty_df.empty:
+            lines.append("")
+        lines.append("*S&P 500 \\(USD\\):*")
+        for _, r in sp500_df.iterrows():
+            tk  = _esc(r["ticker"])
+            dt  = _esc(str(r["entry_date"]))
+            ep  = _esc(f"{float(r['entry_price']):.2f}")
+            hp  = _esc(f"{float(r['highest_price_reached']):.2f}")
+            ts  = _esc(f"{float(r['trailing_stop']):.2f}")
+            lines.append(f"*{tk}* \\(entry {dt}\\)\n  \\${ep} → high \\${hp} \\| stop \\${ts}")
 
     await update.message.reply_text(
         "\n".join(lines),
