@@ -6,6 +6,7 @@ Usage (run from E:\\Trading Systems):
     venv\\Scripts\\python.exe SP500\\run_sp500_backtest.py --checkpoint membership
     venv\\Scripts\\python.exe SP500\\run_sp500_backtest.py --checkpoint backtest
     venv\\Scripts\\python.exe SP500\\run_sp500_backtest.py --checkpoint backtest --force-refresh
+    venv\\Scripts\\python.exe SP500\\run_sp500_backtest.py --checkpoint regime
 
 Checkpoints:
     membership  -- CP-S2: download fja05680 constituent CSV, parse intervals,
@@ -13,6 +14,8 @@ Checkpoints:
     backtest    -- CP-S3: download prices for all historical S&P 500 tickers
                    (from 2005-01-01), simulate strategy, print year-by-year stats,
                    save to trading.db as strategy_version='sp500_52wh_v1'
+    regime      -- CP-S4: download ^GSPC + ^VIX daily closes, compute 200-DMA regime
+                   and VIX tier signals, populate sp500_market_regime table
 """
 
 import argparse
@@ -36,6 +39,7 @@ from backtest.engine import (
     STRATEGY_VERSION, LOOKBACK_START,
     run_full_backtest,
 )
+from backtest.regime import build_regime_table
 
 logging.basicConfig(
     level=logging.INFO,
@@ -276,6 +280,44 @@ def checkpoint_backtest(force_refresh: bool = False) -> None:
     print(f"{_DIV}\n")
 
 
+# ════════════════════════════════════════════════════════════════════════════
+#  CP-S4 — REGIME ANALYSIS
+# ════════════════════════════════════════════════════════════════════════════
+
+def checkpoint_regime() -> None:
+    logger.info(_DIV)
+    logger.info("CP-S4 -- S&P 500 Regime Analysis (^GSPC 200-DMA + ^VIX tiers)")
+    logger.info(_DIV)
+
+    regime_df = build_regime_table()
+
+    bull_days = (regime_df["gspc_regime"] == "bull").sum()
+    bear_days = (regime_df["gspc_regime"] == "bear").sum()
+    total     = len(regime_df)
+    calm_days     = (regime_df["vix_tier"] == "calm").sum()
+    elevated_days = (regime_df["vix_tier"] == "elevated").sum()
+    stressed_days = (regime_df["vix_tier"] == "stressed").sum()
+
+    print(f"\n{_DIV}")
+    print(f"  CP-S4 COMPLETE -- S&P 500 Market Regime Table")
+    print(_DIV)
+    print(f"  Trading days covered: {total:,}  "
+          f"({regime_df.index[0].date()} to {regime_df.index[-1].date()})")
+    print(f"")
+    print(f"  ^GSPC 200-DMA Regime:")
+    print(f"    Bull (close > 200-DMA):  {bull_days:4d} days  ({bull_days/total*100:.1f}%)")
+    print(f"    Bear (close <= 200-DMA): {bear_days:4d} days  ({bear_days/total*100:.1f}%)")
+    print(f"")
+    print(f"  ^VIX Tier:")
+    print(f"    Calm     (VIX < 20):    {calm_days:4d} days  ({calm_days/total*100:.1f}%)")
+    print(f"    Elevated (20 <= VIX<25):{elevated_days:4d} days  ({elevated_days/total*100:.1f}%)")
+    print(f"    Stressed (VIX >= 25):   {stressed_days:4d} days  ({stressed_days/total*100:.1f}%)")
+    print(_DIV)
+    print(f"\n  Regime rows saved to: sp500_market_regime table in trading.db")
+    print(f"  Open the S&P 500 dashboard tab > Regime Analysis to see the breakdown.")
+    print(f"{_DIV}\n")
+
+
 # ── Formatting helpers ─────────────────────────────────────────────────────────
 
 def _fmt_int(row, col):
@@ -304,9 +346,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--checkpoint",
-        choices=["membership", "backtest"],
+        choices=["membership", "backtest", "regime"],
         default="membership",
-        help="membership = CP-S2 (ingest constituent history); backtest = CP-S3",
+        help="membership=CP-S2 (constituent history); backtest=CP-S3; regime=CP-S4",
     )
     parser.add_argument(
         "--force-refresh",
@@ -319,6 +361,8 @@ def main() -> None:
         checkpoint_membership(force_refresh=args.force_refresh)
     elif args.checkpoint == "backtest":
         checkpoint_backtest(force_refresh=args.force_refresh)
+    elif args.checkpoint == "regime":
+        checkpoint_regime()
 
 
 if __name__ == "__main__":

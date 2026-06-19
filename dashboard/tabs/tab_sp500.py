@@ -34,6 +34,11 @@ SV_SP500 = "sp500_52wh_v1"
 SV_NIFTY = "52wh_v1"
 CUR_YEAR = date.today().year
 
+_REGIME_ORDER = ["bull", "bear", "unknown"]
+_VIX_ORDER    = ["calm", "elevated", "stressed", "unknown"]
+_REGIME_COLOR = {"bull": "#26a69a", "bear": "#ef5350", "unknown": "#90a4ae"}
+_VIX_COLOR    = {"calm": "#42a5f5", "elevated": "#ffa726", "stressed": "#ef5350", "unknown": "#90a4ae"}
+
 
 # ── Data loaders ───────────────────────────────────────────────────────────────
 
@@ -53,6 +58,51 @@ def _load_sp500() -> tuple[pd.DataFrame, pd.DataFrame]:
         lambda x: pd.to_datetime(x).date() if pd.notna(x) and x else None
     )
     return df[df["status"] == "closed"].copy(), df[df["status"] == "open"].copy()
+
+
+@st.cache_data(ttl=300)
+def _load_regime() -> pd.DataFrame:
+    """Load sp500_market_regime table. Returns DataFrame indexed by date."""
+    engine = get_engine()
+    try:
+        df = pd.read_sql("SELECT * FROM sp500_market_regime ORDER BY date", engine)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    return df.set_index("date")
+
+
+@st.cache_data(ttl=300)
+def _load_sp500_with_regime() -> pd.DataFrame:
+    """Closed sp500_52wh_v1 trades joined with regime at entry_date."""
+    engine = get_engine()
+    try:
+        df = pd.read_sql(
+            """
+            SELECT t.id, t.ticker, t.entry_date, t.exit_date, t.entry_price,
+                   t.exit_price, t.return_pct, t.holding_days, t.exit_reason,
+                   t.trade_year, t.status,
+                   r.gspc_regime, r.vix_tier, r.gspc_close, r.gspc_ma200,
+                   r.gspc_dist_200dma_pct, r.gspc_6m_return_pct, r.vix_close
+            FROM trades t
+            LEFT JOIN sp500_market_regime r ON t.entry_date = r.date
+            WHERE t.source='backtest' AND t.strategy_version=:sv
+              AND t.status='closed'
+            ORDER BY t.entry_date
+            """,
+            engine, params={"sv": SV_SP500},
+        )
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    df["entry_date"] = pd.to_datetime(df["entry_date"]).dt.date
+    df["exit_date"]  = df["exit_date"].apply(
+        lambda x: pd.to_datetime(x).date() if pd.notna(x) and x else None
+    )
+    return df
 
 
 @st.cache_data(ttl=300)
@@ -178,6 +228,135 @@ def _metric_cols(s: dict, label: str) -> None:
     c3.metric("Losers",        f"{s['total'] - s['wins']:,}")
 
 
+# ── Regime analysis helpers ────────────────────────────────────────────────────
+
+def _regime_breakdown(df: pd.DataFrame, group_col: str, order: list) -> pd.DataFrame:
+    """Return per-regime stats table for closed trades."""
+    rows = []
+    for val in order:
+        sub = df[df[group_col] == val]
+        if sub.empty:
+            continue
+        w = sub[sub["return_pct"] > 0]
+        rows.append({
+            group_col:    val,
+            "Trades":     len(sub),
+            "Win %":      round(len(w) / len(sub) * 100, 1),
+            "Avg %":      round(sub["return_pct"].mean(),    2),
+            "Median %":   round(sub["return_pct"].median(),  2),
+            "Avg Days":   round(sub["holding_days"].mean(),  1),
+            "Best %":     round(sub["return_pct"].max(),     2),
+            "Worst %":    round(sub["return_pct"].min(),     2),
+            "Gross %pts": round(sub["return_pct"].sum(),     0),
+        })
+    return pd.DataFrame(rows)
+
+
+def _regime_bar_chart(breakdown: pd.DataFrame, group_col: str,
+                       color_map: dict, metric: str, title: str) -> go.Figure:
+    fig = go.Figure()
+    vals = breakdown[group_col].tolist()
+    fig.add_trace(go.Bar(
+        x=vals,
+        y=breakdown[metric].tolist(),
+        marker_color=[color_map.get(v, "#90a4ae") for v in vals],
+        text=[f"{v:.1f}" for v in breakdown[metric].tolist()],
+        textposition="outside",
+        hovertemplate=f"%{{x}}<br>{metric}: %{{y:.1f}}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=dict(text=title, font_size=13),
+        xaxis=dict(title=group_col.replace("_", " ").title()),
+        yaxis=dict(title=metric),
+        height=320,
+        margin=dict(l=50, r=30, t=60, b=50),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def _gspc_chart(regime_df: pd.DataFrame) -> go.Figure:
+    """^GSPC close vs 200-DMA line chart."""
+    d = regime_df[regime_df["gspc_close"].notna() & regime_df["gspc_ma200"].notna()].copy()
+    dates = [str(x) for x in d.index]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=dates, y=d["gspc_close"].tolist(),
+        name="^GSPC Close", line=dict(color="#1565c0", width=1.5),
+        hovertemplate="%{x}<br>^GSPC: %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dates, y=d["gspc_ma200"].tolist(),
+        name="200-DMA", line=dict(color="#f57c00", width=1.5, dash="dot"),
+        hovertemplate="%{x}<br>200-DMA: %{y:,.0f}<extra></extra>",
+    ))
+    # Shade bear periods
+    bear_mask = d["gspc_regime"] == "bear"
+    in_bear = False
+    bear_start = None
+    shapes = []
+    for i, (dt, is_bear) in enumerate(zip(d.index, bear_mask)):
+        dt_str = str(dt)
+        if is_bear and not in_bear:
+            bear_start = dt_str
+            in_bear = True
+        elif not is_bear and in_bear:
+            shapes.append(dict(
+                type="rect", xref="x", yref="paper",
+                x0=bear_start, x1=dt_str, y0=0, y1=1,
+                fillcolor="rgba(239,83,80,0.12)", line_width=0, layer="below",
+            ))
+            in_bear = False
+    if in_bear:
+        shapes.append(dict(
+            type="rect", xref="x", yref="paper",
+            x0=bear_start, x1=str(d.index[-1]), y0=0, y1=1,
+            fillcolor="rgba(239,83,80,0.12)", line_width=0, layer="below",
+        ))
+
+    fig.update_layout(
+        title=dict(text="^GSPC vs 200-DMA (red shading = bear regime)", font_size=13),
+        shapes=shapes,
+        xaxis=dict(title="", tickangle=-45, tickfont_size=9),
+        yaxis=dict(title="^GSPC Level"),
+        legend=dict(orientation="h", y=1.10, x=0),
+        hovermode="x unified",
+        height=380,
+        margin=dict(l=60, r=30, t=80, b=70),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def _vix_chart(regime_df: pd.DataFrame) -> go.Figure:
+    """^VIX close line chart with tier threshold lines."""
+    d = regime_df[regime_df["vix_close"].notna()].copy()
+    dates = [str(x) for x in d.index]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=dates, y=d["vix_close"].tolist(),
+        name="^VIX", line=dict(color="#7b1fa2", width=1.2),
+        fill="tozeroy", fillcolor="rgba(123,31,162,0.08)",
+        hovertemplate="%{x}<br>VIX: %{y:.1f}<extra></extra>",
+    ))
+    fig.add_hline(y=20, line_color="#ffa726", line_dash="dot",
+                  annotation_text="20 (calm→elevated)", annotation_position="top left")
+    fig.add_hline(y=25, line_color="#ef5350", line_dash="dot",
+                  annotation_text="25 (elevated→stressed)", annotation_position="top left")
+    fig.update_layout(
+        title=dict(text="^VIX — Volatility Regime", font_size=13),
+        xaxis=dict(title="", tickangle=-45, tickfont_size=9),
+        yaxis=dict(title="VIX Level"),
+        height=300,
+        margin=dict(l=60, r=30, t=60, b=70),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
 # ── Comparison helpers ─────────────────────────────────────────────────────────
 
 def _compare_metric(col, label: str, sp_val, nifty_val, fmt: str = "{:+.1f}%") -> None:
@@ -248,8 +427,9 @@ def render_tab() -> None:
     st.divider()
 
     # ── Sub-tabs ───────────────────────────────────────────────────────────────
-    backtest_tab, delist_tab, compare_tab = st.tabs([
+    backtest_tab, regime_tab, delist_tab, compare_tab = st.tabs([
         "Backtest Results",
+        "Regime Analysis",
         "Delisted Exits",
         "vs Nifty 500",
     ])
@@ -382,7 +562,172 @@ def render_tab() -> None:
             )
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 2 — DELISTED EXITS
+    # TAB 2 — REGIME ANALYSIS
+    # ═══════════════════════════════════════════════════════════════════════════
+    with regime_tab:
+        st.subheader("S&P 500 Regime Analysis — CP-S4")
+        st.markdown(
+            "Tags each trade's **entry date** with the prevailing market regime:  \n"
+            "- **^GSPC 200-DMA**: *bull* (index above 200-day moving average) or "
+            "*bear* (index below).  \n"
+            "- **^VIX tier**: *calm* (VIX < 20) · *elevated* (20–25) · "
+            "*stressed* (VIX ≥ 25).  \n"
+            "All regime signals are **point-in-time at entry** — no lookahead."
+        )
+
+        tagged_df = _load_sp500_with_regime()
+        regime_df = _load_regime()
+
+        if tagged_df.empty or "gspc_regime" not in tagged_df.columns:
+            st.warning(
+                "**Regime data not yet built.** "
+                "Go to **Setup & Admin → Step 6** and click "
+                "**Build S&P 500 Regime Table** (~1–2 min)."
+            )
+        else:
+            has_regime = tagged_df["gspc_regime"].notna()
+            n_tagged   = int(has_regime.sum())
+            n_total    = len(tagged_df)
+            pct_tagged = n_tagged / n_total * 100 if n_total else 0
+
+            st.caption(
+                f"{n_tagged:,} of {n_total:,} closed trades tagged ({pct_tagged:.1f}%). "
+                "Trades with no regime match (pre-2006 or data gap) show as 'unknown'."
+            )
+
+            tagged = tagged_df[tagged_df["return_pct"].notna()].copy()
+            tagged["gspc_regime"] = tagged["gspc_regime"].fillna("unknown")
+            tagged["vix_tier"]    = tagged["vix_tier"].fillna("unknown")
+
+            st.divider()
+
+            # ── Section 1: 200-DMA Regime breakdown ───────────────────────
+            st.subheader("Entries by ^GSPC 200-DMA Regime")
+            st.caption(
+                "'Bull' = entry when S&P 500 index was above its 200-day MA. "
+                "'Bear' = below. This is the *index* regime — NOT the individual stock."
+            )
+
+            regime_bd = _regime_breakdown(tagged, "gspc_regime", _REGIME_ORDER)
+
+            if not regime_bd.empty:
+                st.dataframe(
+                    regime_bd,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "gspc_regime":  st.column_config.TextColumn("Regime",      width=100),
+                        "Trades":       st.column_config.NumberColumn("Trades",    format="%d"),
+                        "Win %":        st.column_config.NumberColumn("Win %",     format="%.1f%%"),
+                        "Avg %":        st.column_config.NumberColumn("Avg %",     format="%+.2f%%"),
+                        "Median %":     st.column_config.NumberColumn("Median %",  format="%+.2f%%"),
+                        "Avg Days":     st.column_config.NumberColumn("Avg Days",  format="%.0f"),
+                        "Best %":       st.column_config.NumberColumn("Best %",    format="%+.2f%%"),
+                        "Worst %":      st.column_config.NumberColumn("Worst %",   format="%+.2f%%"),
+                        "Gross %pts":   st.column_config.NumberColumn("Gross %pts",format="%+,.0f"),
+                    },
+                )
+
+                rc1, rc2 = st.columns(2)
+                with rc1:
+                    st.plotly_chart(
+                        _regime_bar_chart(regime_bd, "gspc_regime", _REGIME_COLOR,
+                                          "Win %", "Win Rate by ^GSPC Regime (%)"),
+                        use_container_width=True,
+                    )
+                with rc2:
+                    st.plotly_chart(
+                        _regime_bar_chart(regime_bd, "gspc_regime", _REGIME_COLOR,
+                                          "Avg %", "Avg Return by ^GSPC Regime (%)"),
+                        use_container_width=True,
+                    )
+
+            st.divider()
+
+            # ── Section 2: VIX tier breakdown ─────────────────────────────
+            st.subheader("Entries by ^VIX Tier")
+            st.caption(
+                "VIX < 20 = Calm (low fear). 20–25 = Elevated. ≥25 = Stressed (high fear / market dislocation). "
+                "Measured at entry date."
+            )
+
+            vix_bd = _regime_breakdown(tagged, "vix_tier", _VIX_ORDER)
+
+            if not vix_bd.empty:
+                st.dataframe(
+                    vix_bd,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "vix_tier":     st.column_config.TextColumn("VIX Tier",   width=110),
+                        "Trades":       st.column_config.NumberColumn("Trades",    format="%d"),
+                        "Win %":        st.column_config.NumberColumn("Win %",     format="%.1f%%"),
+                        "Avg %":        st.column_config.NumberColumn("Avg %",     format="%+.2f%%"),
+                        "Median %":     st.column_config.NumberColumn("Median %",  format="%+.2f%%"),
+                        "Avg Days":     st.column_config.NumberColumn("Avg Days",  format="%.0f"),
+                        "Best %":       st.column_config.NumberColumn("Best %",    format="%+.2f%%"),
+                        "Worst %":      st.column_config.NumberColumn("Worst %",   format="%+.2f%%"),
+                        "Gross %pts":   st.column_config.NumberColumn("Gross %pts",format="%+,.0f"),
+                    },
+                )
+
+                vc1, vc2 = st.columns(2)
+                with vc1:
+                    st.plotly_chart(
+                        _regime_bar_chart(vix_bd, "vix_tier", _VIX_COLOR,
+                                          "Win %", "Win Rate by VIX Tier (%)"),
+                        use_container_width=True,
+                    )
+                with vc2:
+                    st.plotly_chart(
+                        _regime_bar_chart(vix_bd, "vix_tier", _VIX_COLOR,
+                                          "Avg %", "Avg Return by VIX Tier (%)"),
+                        use_container_width=True,
+                    )
+
+            st.divider()
+
+            # ── Section 3: Combined regime × VIX matrix ───────────────────
+            st.subheader("Combined Regime Matrix (200-DMA × VIX)")
+            st.caption(
+                "Each cell shows: Trades | Win% | Avg% for entries in that combined regime state."
+            )
+
+            matrix_rows = []
+            for regime in [r for r in _REGIME_ORDER if r != "unknown"]:
+                row = {"Regime \\ VIX": regime.title()}
+                for tier in [t for t in _VIX_ORDER if t != "unknown"]:
+                    sub = tagged[(tagged["gspc_regime"] == regime) & (tagged["vix_tier"] == tier)]
+                    if sub.empty:
+                        row[tier.title()] = "—"
+                    else:
+                        w = sub[sub["return_pct"] > 0]
+                        row[tier.title()] = (
+                            f"{len(sub)} trades | "
+                            f"{len(w)/len(sub)*100:.0f}% win | "
+                            f"avg {sub['return_pct'].mean():+.1f}%"
+                        )
+                matrix_rows.append(row)
+
+            matrix_df = pd.DataFrame(matrix_rows)
+            st.dataframe(matrix_df, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── Section 4: ^GSPC price chart ──────────────────────────────
+            st.subheader("^GSPC vs 200-DMA Over Time")
+            if not regime_df.empty:
+                st.plotly_chart(_gspc_chart(regime_df), use_container_width=True)
+            else:
+                st.caption("Regime table not loaded.")
+
+            # ── Section 5: ^VIX chart ─────────────────────────────────────
+            st.subheader("^VIX Volatility History")
+            if not regime_df.empty:
+                st.plotly_chart(_vix_chart(regime_df), use_container_width=True)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB 3 — DELISTED EXITS
     # ═══════════════════════════════════════════════════════════════════════════
     with delist_tab:
         st.subheader("Delisted / Acquired Exits")

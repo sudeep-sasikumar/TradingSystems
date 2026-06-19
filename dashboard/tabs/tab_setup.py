@@ -152,8 +152,27 @@ def render_tab() -> None:
 
     st.divider()
 
+    # ── Step 6 — SP500 regime ──────────────────────────────────────────────────
+    st.subheader("Step 6 — S&P 500 Regime Analysis (CP-S4)")
+    st.markdown(
+        "Downloads ^GSPC (S&P 500 index) and ^VIX daily closes from 2004 to today, "
+        "computes the 200-DMA regime (*bull* / *bear*) and VIX tier (*calm* / *elevated* / *stressed*), "
+        "and populates the `sp500_market_regime` table.  \n"
+        "Required for the **Regime Analysis** sub-tab in the S&P 500 dashboard.  \n"
+        "**Est. runtime:** ~1–2 min"
+    )
+    if st.button("▶  Build S&P 500 Regime Table", key="btn_sp500_regime"):
+        _run_step(
+            label="S&P 500 Regime (CP-S4) — ^GSPC + ^VIX 200-DMA",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "regime"],
+            timeout=300,
+        )
+        st.info("Done — open the **S&P 500 → Regime Analysis** tab to see the breakdown.")
+
+    st.divider()
+
     # ── Run All ────────────────────────────────────────────────────────────────
-    st.subheader("Run All Steps (1 → 2 → 3 → 4 → 5)")
+    st.subheader("Run All Steps (1 → 2 → 3 → 4 → 5 → 6)")
     st.warning(
         "Runs all Nifty + S&P 500 steps sequentially. **Total runtime: 90–150 min** "
         "on first run (price downloads for both universes). "
@@ -206,6 +225,12 @@ def render_tab() -> None:
                 cmd=[_PY, _RUN_SP500, "--checkpoint", "backtest"],
                 timeout=9000,
             )
+        st.markdown("**Step 6 — S&P 500 Regime**")
+        _run_step(
+            label="S&P 500 Regime (CP-S4) — ^GSPC + ^VIX 200-DMA",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "regime"],
+            timeout=300,
+        )
         st.success("All steps complete — click **Refresh Status** at the top to verify.")
 
     st.divider()
@@ -257,10 +282,13 @@ def _db_status() -> None:
     c5.metric("Live Trades",         f"{n_live:,}")
     c6.metric("Nifty Membership",    f"{n_membership:,}", help="Point-in-time Nifty 500 membership intervals")
 
+    n_sp500_regime = _q("SELECT COUNT(*) FROM sp500_market_regime")
+
     st.markdown("**S&P 500 (US)**")
-    d1, d2 = st.columns(2)
+    d1, d2, d3 = st.columns(3)
     d1.metric("SP500 Membership Rows",  f"{n_sp500_member:,}", help="Historical constituent intervals (sp500_membership)")
     d2.metric("SP500 Backtest Trades",  f"{n_sp500_trades:,}", help="strategy_version=sp500_52wh_v1, source=backtest")
+    d3.metric("SP500 Regime Days",      f"{n_sp500_regime:,}", help="Trading days in sp500_market_regime (^GSPC 200-DMA + VIX)")
 
     nifty_checks = {
         "Nifty original backtest":  n_orig > 500,
@@ -272,6 +300,7 @@ def _db_status() -> None:
     sp500_checks = {
         "S&P 500 membership table": n_sp500_member > 400,
         "S&P 500 backtest trades":  n_sp500_trades > 500,
+        "S&P 500 regime table":     n_sp500_regime > 1000,
     }
     all_checks = {**nifty_checks, **sp500_checks}
 
@@ -282,6 +311,11 @@ def _db_status() -> None:
         st.warning(f"Missing: {', '.join(missing)}.")
 
     # Contextual next-step guidance
+    if n_sp500_trades > 500 and n_sp500_regime == 0:
+        st.info(
+            "**Next step (S&P 500):** Run **Step 6 — S&P 500 Regime** below. "
+            "Your backtest is complete; regime tags enable the Regime Analysis sub-tab. (~1–2 min)"
+        )
     if n_orig > 500 and n_tags_orig == 0:
         st.info(
             "**Next step:** Run **Step 3 — Tag Regimes** below. "
@@ -356,6 +390,9 @@ docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint me
 
 # Step 5: S&P 500 backtest (45-90 min, ~900 tickers x 20 years of prices)
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint backtest
+
+# Step 6: S&P 500 regime analysis (~1-2 min, downloads ^GSPC + ^VIX)
+docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint regime
 ```
 
 **Force re-download all price data (clears cache):**
@@ -367,6 +404,7 @@ docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpo
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint tag --strategy-version 52wh_v1_survivorship_10y --force-refresh
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint membership --force-refresh
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint backtest --force-refresh
+docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint regime
 ```
 
 **Deploy latest code after `git pull`:**

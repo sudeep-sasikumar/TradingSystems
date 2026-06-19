@@ -191,6 +191,32 @@ class Sp500Membership(Base):
     )
 
 
+class Sp500MarketRegime(Base):
+    """
+    Daily ^GSPC + ^VIX regime signals for the S&P 500 system.
+
+    Written by SP500/backtest/regime.py (CP-S4).
+    Dashboard joins trades.entry_date with this table to classify entry regime.
+
+    200-DMA regime: 'bull' = close > ma200, 'bear' = close ≤ ma200.
+    VIX tier:       'calm' = VIX < 20, 'elevated' = 20-25, 'stressed' = ≥25.
+    """
+    __tablename__ = "sp500_market_regime"
+
+    date                 = Column(String(10), primary_key=True)   # YYYY-MM-DD
+    gspc_close           = Column(Float)
+    gspc_ma200           = Column(Float)
+    gspc_regime          = Column(String(10))    # 'bull' | 'bear' | 'unknown'
+    gspc_dist_200dma_pct = Column(Float)         # % distance above/below 200-DMA
+    gspc_6m_return_pct   = Column(Float)         # 126-trading-day trailing return
+    vix_close            = Column(Float)
+    vix_tier             = Column(String(15))    # 'calm' | 'elevated' | 'stressed'
+
+    __table_args__ = (
+        Index("ix_sp500_regime_date", "date"),
+    )
+
+
 class TradeRegimeTag(Base):
     """
     Regime tags for every trade in the survivorship-corrected historic backtest.
