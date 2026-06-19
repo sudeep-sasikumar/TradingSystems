@@ -7,10 +7,10 @@
 ## Current State
 
 - **Date last updated**: 2026-06-19
-- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete)
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5, CP-S6, CP-S7
+- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete) + Freshness analysis (complete)
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5, CP-S6, CP-S7 + Freshness Factor
 - **Next action (VPS)**: git pull → docker compose up --build -d (adds sp500_scanner service; rebuilds bot + dashboard)
-- **Next build**: None currently scheduled — S&P 500 system fully live
+- **Next build**: None currently scheduled — run --checkpoint freshness locally to populate freshness columns
 
 ---
 
@@ -529,6 +529,51 @@ docker compose logs -f sp500_scanner
 **Test without waiting for schedule:**
 ```bash
 docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
+```
+
+---
+
+### ✅ Freshness Factor Analysis (complete, 2026-06-19)
+
+**Goal**: Measure whether the time gap since a stock's *previous* 52-week high predicts trade
+outcome — independently of market/sector regime.  Analysis only; no changes to live scanner,
+Telegram bot, or strategy rules.
+
+**Approach**:
+- For each closed trade in `trade_regime_tags`, load the stock's prior price series and compute
+  the 252-day rolling max benchmark (`shift(1).rolling(252).max()`).
+- Find the last date *before* entry where `close > benchmark` (point-in-time, no lookahead).
+- Gap = `(prior trading days after last prior signal) + 1` (the +1 = entry date itself).
+
+**Three freshness categories**:
+- `insufficient_history` — fewer than 253 price rows before entry; can't form the 252-day window.
+- `first_observed_high`  — 253+ rows, no prior signal found in cache (gap > cache start date).
+- `gap_computed`         — prior signal found; gap_td / gap_cal / prior_date are valid.
+
+**Six gap buckets**: < 1 wk (1–4 td) · 1w–1m (5–21 td) · 1–6m (22–129 td) ·
+6–12m (130–251 td) · 1–3yr (252–755 td) · 3yr+ (756+ td).
+
+**Important caveat**: `52wh_v1` price cache starts 2021-01-01 → `first_observed_high` in that
+dataset means "last signal was before Jan 2021", not necessarily a multi-year base breakout.
+The `52wh_v1_survivorship_10y` dataset (cache from 2018) is the trustworthy one for this bucket.
+
+**Files created:**
+- `52WeekHigh/analysis/freshness_tagger.py` — `tag_freshness()` (batch UPDATE), `run_freshness_analysis()`
+  (CLI printed analysis), `load_freshness_df()` (for dashboard), `assign_bucket()` + `BUCKET_ORDER` (shared).
+
+**Files modified:**
+- `shared/models.py` — 4 new nullable columns on `TradeRegimeTag`:
+  `freshness_category`, `freshness_gap_td`, `freshness_gap_cal`, `freshness_prior_date`.
+- `52WeekHigh/run_regime_analysis.py` — `--checkpoint freshness` and `--checkpoint freshness-analyze`.
+- `dashboard/tabs/tab_regime.py` — "Freshness Factor" 6th inner tab with: gap distribution histogram,
+  bucket breakdown table + bar chart, first_observed_high vs. rest, freshness×regime cross-tab, caveats.
+
+**To populate freshness data (run locally, after --checkpoint tag):**
+```powershell
+python 52WeekHigh/run_regime_analysis.py --checkpoint freshness --strategy-version 52wh_v1
+python 52WeekHigh/run_regime_analysis.py --checkpoint freshness --strategy-version 52wh_v1_survivorship_10y
+# Full printed analysis:
+python 52WeekHigh/run_regime_analysis.py --checkpoint freshness-analyze
 ```
 
 ---
