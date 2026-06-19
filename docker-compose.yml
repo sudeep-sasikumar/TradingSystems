@@ -38,6 +38,25 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  sp500_scanner:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-sp500scanner:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sp500_scanner
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      - SP500_MAX_CONCURRENT_POSITIONS=${SP500_MAX_CONCURRENT_POSITIONS:-20}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - trading_data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   dashboard:
     image: ghcr.io/sudeep-sasikumar/tradingsystems-dashboard:latest
     build:

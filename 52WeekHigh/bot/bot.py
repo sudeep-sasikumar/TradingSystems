@@ -125,14 +125,14 @@ def _esc(value) -> str:
 
 def _fmt_conviction(row: pd.Series) -> str:
     """
-    Return MarkdownV2 string for the conviction tier line.
+    Nifty 500 conviction tier line (MarkdownV2).
     Returns empty string for old signals with no tier data.
 
     Tier rules (Checkpoint 8b):
       HIGH     : market 6M bottom-2 quintiles AND sector basket above 200-DMA
       AVOID    : market 6M strong_uptrend quintile
       STANDARD : everything else
-    Advisory only -- never blocks the signal; user makes final call.
+    Advisory only — never blocks the signal; user makes final call.
     """
     tier = row.get("conviction_tier")
     if not tier:
@@ -149,7 +149,36 @@ def _fmt_conviction(row: pd.Series) -> str:
             "_\\[Market in strong uptrend \\- historically weakest entry "
             "\\(avg \\+9% vs \\+27% baseline\\)\\. Take with caution\\.\\]_"
         )
-    # STANDARD
+    return "\nConviction: STANDARD"
+
+
+def _fmt_sp500_conviction(row: pd.Series) -> str:
+    """
+    S&P 500 conviction tier line (MarkdownV2).
+
+    Tier rules (CP-S6, calibrated from sp500_52wh_v1 backtest + ^GSPC/^VIX regime):
+      HIGH     : bull regime + calm VIX (< 20)
+                 score = +2 — strongest historical SP500 momentum environment
+      AVOID    : bear regime + elevated/stressed VIX (>= 20)
+                 score <= -1 — market downtrend, breakouts historically failed to sustain
+      STANDARD : all other combinations (score 0 or 1)
+    Advisory only — never blocks the signal; user makes final call.
+    """
+    tier = row.get("conviction_tier")
+    if not tier:
+        return ""
+
+    if tier == "HIGH":
+        return (
+            "\nConviction: *HIGH*\n"
+            "_\\[Bull regime \\+ calm VIX \\(\\<20\\) \\— best historical SP500 momentum environment\\]_"
+        )
+    if tier == "AVOID":
+        return (
+            "\n⚠ Conviction: *AVOID*\n"
+            "_\\[Bear regime or stressed VIX \\— new 52wk highs historically failed "
+            "to sustain in downtrend\\. Trade with caution\\.\\]_"
+        )
     return "\nConviction: STANDARD"
 
 
@@ -179,14 +208,16 @@ def _fmt_signal(row: pd.Series) -> str:
     )
 
     if is_sp500:
-        price_str = f"\\${_esc(f'{price:.2f}')}"
-        bm_str    = f"\\${_esc(f'{bm:.2f}')}"
+        price_str      = f"\\${_esc(f'{price:.2f}')}"
+        bm_str         = f"\\${_esc(f'{bm:.2f}')}"
+        conviction_note = _fmt_sp500_conviction(row)
         return (
             f"*\\[S&P500\\] 52\\-Week High Signal*\n\n"
             f"*{ticker}* — {company}\n"
             f"Signal price: {price_str} — _actual fill price may differ\\._\n"
             f"Above 252\\-day high: {bm_str} \\(\\+{_esc(f'{pct:.2f}')}%\\)\n"
-            f"Type: {type_lbl}\n\n"
+            f"Type: {type_lbl}"
+            f"{conviction_note}\n\n"
             f"_Detected: {_esc(ts)} UTC_"
             f"{cap_note}"
         )

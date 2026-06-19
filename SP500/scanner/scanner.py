@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-S&P 500 52-Week High — Daily EOD Scanner (CP-S5)
+S&P 500 52-Week High — Daily EOD Scanner (CP-S5 + CP-S6)
 
 ENTRY SIGNAL:
     Close-based only — no provisional phase.
@@ -59,6 +59,7 @@ load_dotenv(_ROOT / ".env")
 
 from shared.db import get_engine, session_scope
 from shared.models import Signal, Trade
+from SP500.analysis.sp500_conviction import get_sp500_conviction
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -417,6 +418,15 @@ def run_eod_scan(universe_df: pd.DataFrame) -> None:
     open_count = count_open_live()
     cap        = SP500_MAX_POSITIONS
 
+    # CP-S6: conviction tier — same for all signals fired on the same day
+    conviction    = get_sp500_conviction(today_str)
+    conv_tier     = conviction["tier"]
+    conv_score    = conviction["regime_score"]
+    logger.info(
+        "Market regime: gspc=%s vix=%s score=%d → conviction=%s",
+        conviction["gspc_regime"], conviction["vix_tier"], conv_score, conv_tier,
+    )
+
     logger.info("Tickers above 252d benchmark: %d | Suppressed: %d",
                 len(hits), len(suppressed & set(hits)))
 
@@ -454,6 +464,8 @@ def run_eod_scan(universe_df: pd.DataFrame) -> None:
                     positions_open_at_signal= open_count,
                     cap_at_signal           = cap,
                     strategy_version        = STRATEGY_VERSION,
+                    conviction_tier         = conv_tier,
+                    regime_score            = conv_score,
                 )
                 sess.add(sig)
                 sess.flush()

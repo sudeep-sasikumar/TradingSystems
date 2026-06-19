@@ -7,10 +7,10 @@
 ## Current State
 
 - **Date last updated**: 2026-06-19
-- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S5 complete)
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5
-- **Next action (VPS)**: git pull → docker compose up --build -d (rebuilds bot with SP500 support, adds sp500_scanner service)
-- **Next build**: CP-S6 — regime-enhanced S&P 500 scanner (conviction tiers calibrated from CP-S4 data)
+- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete)
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5, CP-S6, CP-S7
+- **Next action (VPS)**: git pull → docker compose up --build -d (adds sp500_scanner service; rebuilds bot + dashboard)
+- **Next build**: None currently scheduled — S&P 500 system fully live
 
 ---
 
@@ -441,8 +441,95 @@ avg return +13.66% per closed trade, top winner V +741% (2011-2020).
 → Accept creates `Trade(strategy_version='sp500_52wh_v1', source='live')`
 → Scanner checks trailing stops at next 21:30 UTC run
 
-**VPS deployment note:** The `sp500_scanner` Docker service is NOT yet in `docker-compose.yml`
-(that's CP-S7). For now, test via Setup & Admin → Step 7 or CLI `--run-now`.
+**VPS deployment note:** The `sp500_scanner` Docker service is added in CP-S7.
+Deploy with: `git pull && docker compose up --build -d`
+
+---
+
+---
+
+### ✅ CP-S6 — S&P 500 Conviction Tiers (complete, 2026-06-19)
+
+**Goal**: Attach a conviction tier to every S&P 500 live signal at scan time.
+Advisory only — never blocks a signal; user makes the final Accept/Reject call.
+
+**Files created:**
+- `SP500/analysis/__init__.py` — package marker
+- `SP500/analysis/sp500_conviction.py` — conviction lookup + tier assignment
+
+**Files modified:**
+- `SP500/scanner/scanner.py` — computes conviction once per scan (same regime for all signals that day);
+  sets `Signal.conviction_tier` and `Signal.regime_score`
+- `52WeekHigh/bot/bot.py` — added `_fmt_sp500_conviction()` formatter; wired into
+  `_fmt_signal()` S&P 500 branch (shows below "Type:" line in Telegram message)
+
+**Tier rules (calibrated from sp500_52wh_v1 backtest + sp500_market_regime, 2006–2026):**
+
+| Tier | Condition | Score | Historical context |
+|---|---|---|---|
+| HIGH | Bull regime + calm VIX (< 20) | +2 | 2012 (70%/+60%), 2013 (74%/+40%), 2016 (66%/+25%) |
+| AVOID | Bear regime + elevated or stressed VIX (>= 20) | <= -1 | 2008 (11%/-15%), 2022 (27%/-0.5%) |
+| STANDARD | All other combinations | 0 or 1 | bull+elevated/stressed, bear+calm |
+
+**Scoring:** market_score (bull=+1, bear=-1) + vix_score (calm=+1, stressed=-1, elevated=0)
+
+**Regime source:** `sp500_market_regime` table, nearest prior date (handles weekends/holidays).
+Falls back to STANDARD with a warning if no regime data found.
+
+**Telegram signal example (HIGH conviction):**
+```
+[S&P500] 52-Week High Signal
+
+AAPL — Apple Inc.
+Signal price: $197.50 — actual fill price may differ.
+Above 252-day high: $182.00 (+8.52%)
+Type: EOD Confirmed
+Conviction: HIGH
+[Bull regime + calm VIX (<20) — best historical SP500 momentum environment]
+
+Detected: 2026-06-19 21:30 UTC
+```
+
+---
+
+### ✅ CP-S7 — S&P 500 Docker Service (complete, 2026-06-19)
+
+**Goal**: Add `sp500_scanner` as a persistent Docker service so the scanner runs
+automatically at 21:30 UTC Mon–Fri without manual intervention.
+
+**Files created:**
+- `docker/Dockerfile.sp500_scanner` — python:3.13-slim, same pattern as Dockerfile.scanner,
+  CMD runs `SP500/scanner/scanner.py` (APScheduler handles the 21:30 UTC schedule)
+
+**Files modified:**
+- `docker-compose.yml` — added `sp500_scanner` service:
+  - `restart: unless-stopped` (stateless, safe to restart)
+  - Env: `SP500_MAX_CONCURRENT_POSITIONS` (default: 20)
+  - Same `trading_data:/app/data` named volume as other services
+  - Log rotation: json-file 10MB × 3
+- `.env.example` — added `SP500_MAX_CONCURRENT_POSITIONS=20`
+
+**Architecture after CP-S7 — 4 Docker services:**
+
+| Service | Restart policy | Role |
+|---|---|---|
+| `scanner` | unless-stopped | Nifty 500 hourly intraday scanner |
+| `bot` | always | Telegram bot — long-polling, handles all Accepts/Rejects |
+| `dashboard` | unless-stopped | Streamlit on port 8502 |
+| `sp500_scanner` | unless-stopped | S&P 500 EOD scanner, fires 21:30 UTC Mon–Fri |
+
+**Deploy on VPS:**
+```bash
+git pull
+docker compose up --build -d
+docker compose ps          # verify 4 services running
+docker compose logs -f sp500_scanner
+```
+
+**Test without waiting for schedule:**
+```bash
+docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
+```
 
 ---
 
