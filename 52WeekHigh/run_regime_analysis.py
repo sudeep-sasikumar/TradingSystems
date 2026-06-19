@@ -1,18 +1,22 @@
 """
-CLI entry point for Checkpoint 8 — Regime Tagging and Analysis.
+CLI entry point for Checkpoint 8 — Regime Tagging and Analysis,
+and Freshness Factor Analysis.
 
 Usage:
-    # Step 1: Download index data, compute regime signals, tag all trades
+    # Regime tagging (must run before freshness)
     python 52WeekHigh/run_regime_analysis.py --checkpoint tag
-
-    # Step 2: Run cross-tab analysis and print results
     python 52WeekHigh/run_regime_analysis.py --checkpoint analyze
-
-    # Both steps in sequence
     python 52WeekHigh/run_regime_analysis.py --checkpoint all
-
-    # Force re-download of all index data (clears regime cache)
     python 52WeekHigh/run_regime_analysis.py --checkpoint tag --force-refresh
+
+    # Freshness factor (run AFTER regime tag; re-run if tag is re-run)
+    python 52WeekHigh/run_regime_analysis.py --checkpoint freshness \\
+           --strategy-version 52wh_v1
+    python 52WeekHigh/run_regime_analysis.py --checkpoint freshness \\
+           --strategy-version 52wh_v1_survivorship_10y
+
+    # Cross-dataset freshness analysis (reads both strategy versions at once)
+    python 52WeekHigh/run_regime_analysis.py --checkpoint freshness-analyze
 """
 
 import argparse
@@ -52,18 +56,37 @@ def checkpoint_analyze(strategy_version: str) -> None:
     run_analysis(strategy_version=strategy_version)
 
 
+def checkpoint_freshness(strategy_version: str) -> None:
+    logger.info("=" * 60)
+    logger.info(f"FRESHNESS: Computing freshness factor for {strategy_version!r}")
+    logger.info("=" * 60)
+    from analysis.freshness_tagger import tag_freshness
+    summary = tag_freshness(strategy_version=strategy_version)
+    logger.info("Freshness tagging complete: %s", summary)
+
+
+def checkpoint_freshness_analyze() -> None:
+    logger.info("=" * 60)
+    logger.info("FRESHNESS ANALYSIS: Cross-dataset freshness × regime analysis")
+    logger.info("=" * 60)
+    from analysis.freshness_tagger import run_freshness_analysis
+    run_freshness_analysis()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Checkpoint 8 — regime tagging and analysis"
     )
     parser.add_argument(
         "--checkpoint",
-        choices=["tag", "analyze", "all"],
+        choices=["tag", "analyze", "all", "freshness", "freshness-analyze"],
         required=True,
         help=(
             "tag: download index data + compute regime tags + save to DB. "
             "analyze: run cross-tab analysis on tagged trades. "
-            "all: run both in sequence."
+            "all: run both in sequence. "
+            "freshness: compute freshness factor for --strategy-version (run after tag). "
+            "freshness-analyze: cross-dataset freshness × regime analysis (both SVs at once)."
         ),
     )
     parser.add_argument(
@@ -86,6 +109,10 @@ def main():
         checkpoint_tag(force_refresh=args.force_refresh, strategy_version=args.strategy_version)
     if args.checkpoint in ("analyze", "all"):
         checkpoint_analyze(strategy_version=args.strategy_version)
+    if args.checkpoint == "freshness":
+        checkpoint_freshness(strategy_version=args.strategy_version)
+    if args.checkpoint == "freshness-analyze":
+        checkpoint_freshness_analyze()
 
 
 if __name__ == "__main__":

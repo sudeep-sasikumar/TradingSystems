@@ -259,6 +259,21 @@ class TradeRegimeTag(Base):
     synthetic_6m_return_pct  = Column(Float)
     synthetic_6m_quintile    = Column(String(30))
 
+    # ── Freshness factor (CP-S8 / freshness analysis) ─────────────────────────
+    # Written by: 52WeekHigh/analysis/freshness_tagger.py
+    # NULL until --checkpoint freshness is run.  Re-run after --checkpoint tag.
+    #
+    # freshness_category:
+    #   'insufficient_history'  — < 253 price rows before entry; can't compute benchmark
+    #   'first_observed_high'   — 253+ rows, benchmark computed, no prior signal found
+    #                             (may mean gap > cache start; see module docstring)
+    #   'gap_computed'          — prior signal found; gap_td / gap_cal are valid
+    #
+    freshness_category    = Column(String(25))   # see above
+    freshness_gap_td      = Column(Integer)       # trading days since prior 52wh signal; NULL unless gap_computed
+    freshness_gap_cal     = Column(Integer)       # calendar days since prior 52wh signal; NULL unless gap_computed
+    freshness_prior_date  = Column(String(10))   # YYYY-MM-DD of prior signal; NULL unless gap_computed
+
     created_at = Column(String(30), nullable=False, default=_now)
 
     __table_args__ = (

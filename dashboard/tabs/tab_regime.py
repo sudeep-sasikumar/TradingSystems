@@ -21,10 +21,17 @@ import plotly.graph_objects as go
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_52WH = _ROOT / "52WeekHigh"
+for _d in (str(_ROOT), str(_52WH)):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 
 from shared.db import get_engine
+from analysis.freshness_tagger import (
+    BUCKET_ORDER as FRESHNESS_BUCKET_ORDER,
+    assign_bucket as freshness_assign_bucket,
+    load_freshness_df,
+)
 
 MIN_COUNT  = 30
 TRADE_SIZE = 1_000   # Rs. per trade for the flat-allocation simulation
@@ -130,7 +137,11 @@ def _load_tagged_closed(strategy_version: str) -> pd.DataFrame:
                    r.official_dist_200dma_pct, r.official_6m_return_pct,
                    r.industry_group, r.synthetic_basket_size,
                    r.synthetic_vs_200dma, r.synthetic_6m_quintile,
-                   r.synthetic_dist_200dma_pct, r.synthetic_6m_return_pct
+                   r.synthetic_dist_200dma_pct, r.synthetic_6m_return_pct,
+                   r.freshness_category,
+                   r.freshness_gap_td,
+                   r.freshness_gap_cal,
+                   r.freshness_prior_date
             FROM trades t
             JOIN trade_regime_tags r ON t.id = r.trade_id
             WHERE t.strategy_version = :sv
@@ -142,7 +153,21 @@ def _load_tagged_closed(strategy_version: str) -> pd.DataFrame:
             engine,
             params={"sv": strategy_version},
         )
-        return _assign_conviction(df) if not df.empty else df
+        if df.empty:
+            return df
+        df = _assign_conviction(df)
+        # Freshness bucket (NULL → "—" handled in display)
+        if "freshness_category" in df.columns:
+            df["freshness_bucket"] = df.apply(
+                lambda r: freshness_assign_bucket(
+                    r["freshness_category"] or "insufficient_history",
+                    r.get("freshness_gap_td"),
+                )
+                if pd.notna(r.get("freshness_category"))
+                else None,
+                axis=1,
+            )
+        return df
     except Exception:
         return pd.DataFrame()
 
@@ -203,6 +228,267 @@ _NUM_CFG = {
 }
 
 
+# ── Freshness Factor helpers ───────────────────────────────────────────────────
+
+_FRESHNESS_NUM_CFG = {
+    "Win%":     st.column_config.NumberColumn(format="%.1f%%"),
+    "Avg Ret%": st.column_config.NumberColumn(format="%.2f%%"),
+    "Median%":  st.column_config.NumberColumn(format="%.2f%%"),
+}
+
+
+def _freshness_stats(grp: pd.DataFrame) -> dict:
+    n = len(grp)
+    if n == 0:
+        return {"n": 0, "Win%": None, "Avg Ret%": None, "Median%": None, "Avg Days": None}
+    wins = (grp["return_pct"] > 0).sum()
+    return {
+        "n":        n,
+        "Win%":     round(wins / n * 100, 1),
+        "Avg Ret%": round(float(grp["return_pct"].mean()), 2),
+        "Median%":  round(float(grp["return_pct"].median()), 2),
+        "Avg Days": int(round(grp["holding_days"].mean())),
+    }
+
+
+def _render_freshness_tab(df: pd.DataFrame, strategy_version: str, dataset_label: str) -> None:
+    """Render the Freshness Factor inner tab."""
+    st.markdown("#### Freshness Factor — Time Since Prior 52-Week High")
+    st.caption(
+        "For each trade, measures the gap between the entry signal and the previous time "
+        "the same stock crossed its 252-day high. Computed strictly point-in-time (no lookahead). "
+        "Requires `--checkpoint freshness` to be run after regime tagging."
+    )
+
+    freshness_tagged = "freshness_bucket" in df.columns and df["freshness_bucket"].notna().any()
+
+    if not freshness_tagged:
+        st.warning(
+            "No freshness data found for this dataset.\n\n"
+            "Run:\n```\n"
+            f"python 52WeekHigh/run_regime_analysis.py --checkpoint freshness "
+            f"--strategy-version {strategy_version}\n```\n\n"
+            "Then re-run `--checkpoint freshness` if you re-ran `--checkpoint tag`."
+        )
+        return
+
+    # Coverage summary
+    fresh_df = df[df["freshness_bucket"].notna()]
+    cat_counts = fresh_df["freshness_category"].value_counts() if "freshness_category" in fresh_df.columns else {}
+    n_gap      = int(cat_counts.get("gap_computed", 0))
+    n_foh      = int(cat_counts.get("first_observed_high", 0))
+    n_insuf    = int(cat_counts.get("insufficient_history", 0))
+
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    fc1.metric("Total Freshness-Tagged", f"{len(fresh_df):,}")
+    fc2.metric("Gap Computed",           f"{n_gap:,}")
+    fc3.metric("First Observed High",    f"{n_foh:,}")
+    fc4.metric("Insufficient History",   f"{n_insuf:,}")
+
+    if strategy_version == "52wh_v1":
+        st.info(
+            "**Lookback caveat (2022-present dataset):** price cache starts 2021-01-01.  "
+            "`first_observed_high` here may simply mean the last signal was before 2021 — "
+            "not necessarily a multi-year base breakout.  "
+            "The 2019-present dataset has a longer lookback and is more reliable for this analysis."
+        )
+
+    st.divider()
+
+    # ── Gap distribution ───────────────────────────────────────────────────────
+    gap_df = fresh_df[fresh_df["freshness_category"] == "gap_computed"]["freshness_gap_td"].dropna()
+    if len(gap_df) > 0:
+        st.markdown(f"#### Gap Distribution (trading days, n={len(gap_df):,} gap-computed trades)")
+
+        pcts = [0, 5, 10, 25, 50, 75, 90, 95, 100]
+        vals = [float(gap_df.quantile(p / 100)) for p in pcts]
+        pct_rows = [
+            {
+                "Percentile": f"P{p}",
+                "Gap (td)":   int(round(v)),
+                "≈ Calendar": f"{round(int(round(v)) * 365 / 252)}d",
+            }
+            for p, v in zip(pcts, vals)
+        ]
+        col_dist, col_hist = st.columns([1, 2])
+        with col_dist:
+            st.dataframe(pd.DataFrame(pct_rows), hide_index=True, use_container_width=True)
+        with col_hist:
+            hist_vals = gap_df.clip(upper=gap_df.quantile(0.98))   # clip extreme outliers for display
+            fig = go.Figure(go.Histogram(
+                x=hist_vals, nbinsx=40,
+                marker_color="#4a9edd",
+                marker_line=dict(width=0.5, color="rgba(0,0,0,0.3)"),
+            ))
+            fig.add_vline(x=5,   line_dash="dot", line_color="#aaa", annotation_text="1wk")
+            fig.add_vline(x=22,  line_dash="dot", line_color="#aaa", annotation_text="1m")
+            fig.add_vline(x=130, line_dash="dot", line_color="#aaa", annotation_text="6m")
+            fig.add_vline(x=252, line_dash="dot", line_color="#aaa", annotation_text="1yr")
+            fig.add_vline(x=756, line_dash="dot", line_color="#aaa", annotation_text="3yr")
+            fig.update_layout(
+                title="Gap Distribution (clipped at P98)",
+                xaxis_title="Trading days since prior 52wh signal",
+                yaxis_title="Trades",
+                height=260,
+                margin=dict(t=40, b=30, l=40, r=10),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Bucket breakdown ───────────────────────────────────────────────────────
+    st.markdown("#### Performance by Freshness Bucket")
+    st.caption(
+        "Bucket boundaries (trading days): "
+        "< 1 wk = 1–4 · 1w–1m = 5–21 · 1–6m = 22–129 · "
+        "6–12m = 130–251 · 1–3yr = 252–755 · 3yr+ = 756+. "
+        "\\* = fewer than 30 trades — directional only."
+    )
+
+    bkt_rows = []
+    for bkt in FRESHNESS_BUCKET_ORDER:
+        grp = fresh_df[fresh_df["freshness_bucket"] == bkt]
+        if len(grp) == 0:
+            continue
+        s = _freshness_stats(grp)
+        bkt_rows.append({
+            "Freshness Bucket": bkt,
+            "n":        s["n"],
+            "Win%":     s["Win%"],
+            "Avg Ret%": s["Avg Ret%"],
+            "Median%":  s["Median%"],
+            "Avg Days": s["Avg Days"],
+            "Note":     "* n<30" if s["n"] < MIN_COUNT else "",
+        })
+
+    if bkt_rows:
+        bkt_tbl = pd.DataFrame(bkt_rows)
+        st.dataframe(bkt_tbl, hide_index=True, use_container_width=False,
+                     column_config=_FRESHNESS_NUM_CFG)
+
+        # Bar chart: avg return by bucket (gap_computed buckets only)
+        gap_rows = [r for r in bkt_rows
+                    if r["Freshness Bucket"] not in ("insufficient_history", "first_observed_high")]
+        if gap_rows:
+            fig2 = go.Figure(go.Bar(
+                x=[r["Freshness Bucket"] for r in gap_rows],
+                y=[r["Avg Ret%"] for r in gap_rows],
+                marker_color=[
+                    "#2ecc71" if (r["Avg Ret%"] or 0) >= 0 else "#e74c3c"
+                    for r in gap_rows
+                ],
+                text=[f"{r['Avg Ret%']:+.1f}%" for r in gap_rows],
+                textposition="outside",
+            ))
+            fig2.update_layout(
+                title="Avg Return by Freshness Bucket (gap-computed trades)",
+                xaxis_title="Freshness bucket",
+                yaxis_title="Avg Return %",
+                height=300,
+                margin=dict(t=50, b=10),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+    st.divider()
+
+    # ── first_observed_high vs rest ────────────────────────────────────────────
+    st.markdown("#### First Observed High vs All Other Trades")
+    st.caption(
+        "The single comparison that most directly tests the 'breakout from long base' hypothesis. "
+        "first\\_observed\\_high = stock crossed its 252-day high for the first time in the available "
+        "price history — no prior signal found in the cache window."
+    )
+
+    foh_grp  = fresh_df[fresh_df["freshness_bucket"] == "first_observed_high"]
+    rest_grp = fresh_df[fresh_df["freshness_bucket"] != "first_observed_high"]
+    sf = _freshness_stats(foh_grp)
+    sr = _freshness_stats(rest_grp)
+
+    comp_rows = []
+    for label_g, s in [("first_observed_high", sf), ("all other (gap known + insufficient)", sr)]:
+        comp_rows.append({
+            "Group":    label_g,
+            "n":        s["n"],
+            "Win%":     s["Win%"],
+            "Avg Ret%": s["Avg Ret%"],
+            "Median%":  s["Median%"],
+            "Avg Days": s["Avg Days"],
+            "Note":     "* n<30" if s["n"] < MIN_COUNT else "",
+        })
+    if comp_rows:
+        st.dataframe(pd.DataFrame(comp_rows), hide_index=True, use_container_width=False,
+                     column_config=_FRESHNESS_NUM_CFG)
+
+    st.divider()
+
+    # ── Freshness × regime cross-tab ───────────────────────────────────────────
+    st.markdown("#### Freshness × Market Regime Cross-Tab")
+    st.caption(
+        "Does freshness add information WITHIN a single regime bucket? "
+        "If rows within a regime group cluster near the group baseline (< 5pp spread), "
+        "freshness is mostly redundant with regime. "
+        "A consistent spread > 10pp across buckets suggests independent signal."
+    )
+
+    gap_only = fresh_df[fresh_df["freshness_category"] == "gap_computed"]
+
+    for regime_val, regime_label in [("below_200dma", "Market BELOW 200-DMA"), ("above_200dma", "Market ABOVE 200-DMA")]:
+        regime_grp = gap_only[gap_only["market_vs_200dma"] == regime_val]
+        if len(regime_grp) < 5:
+            continue
+        baseline = _freshness_stats(regime_grp)
+        st.markdown(
+            f"**{regime_label}** — {baseline['n']} trades · "
+            f"baseline avg {baseline['Avg Ret%']:+.2f}% · win {baseline['Win%']:.1f}%"
+        )
+
+        xt_rows = []
+        for bkt, _, lbl in [("< 1 week", None, "< 1 week"),
+                             ("1w – 1m", None, "1w – 1m"),
+                             ("1 – 6 months", None, "1 – 6 months"),
+                             ("6 – 12 months", None, "6 – 12 months"),
+                             ("1 – 3 years", None, "1 – 3 years"),
+                             ("3+ years", None, "3+ years")]:
+            grp = regime_grp[regime_grp["freshness_bucket"] == bkt]
+            s = _freshness_stats(grp)
+            if s["n"] < 5:
+                continue
+            delta = round((s["Avg Ret%"] or 0) - (baseline["Avg Ret%"] or 0), 2)
+            xt_rows.append({
+                "Freshness Bucket": bkt,
+                "n":        s["n"],
+                "Win%":     s["Win%"],
+                "Avg Ret%": s["Avg Ret%"],
+                "vs baseline": f"{delta:+.2f}%",
+                "Note":     "* n<30" if s["n"] < MIN_COUNT else "",
+            })
+
+        if xt_rows:
+            st.dataframe(pd.DataFrame(xt_rows), hide_index=True, use_container_width=False,
+                         column_config={
+                             "Win%":     st.column_config.NumberColumn(format="%.1f%%"),
+                             "Avg Ret%": st.column_config.NumberColumn(format="%.2f%%"),
+                         })
+
+    with st.expander("How to interpret this analysis"):
+        st.markdown(
+            """
+**Redundant with regime:** freshness is a proxy for regime if the cross-tab shows that
+"short gap" trades cluster in bull/calm conditions and "long gap" trades cluster in bear/
+stressed conditions. In that case, controlling for regime removes most of the freshness effect.
+
+**Independent signal:** freshness adds value if, within a fixed regime bucket (e.g., all
+"below\\_200dma" trades), the freshness breakdown still shows a meaningful performance split
+(> 10pp avg-return spread, consistent direction, ≥ 30 trades per cell).
+
+**first\\_observed\\_high caveat:** for the 2022-present dataset, the lookback starts
+January 2021, so `first_observed_high` = "last signal before Jan 2021" — not necessarily
+a multi-year base breakout. The 2019-present dataset is more reliable for this comparison
+(lookback starts January 2018).
+            """
+        )
+
+
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render_tab() -> None:
@@ -249,7 +535,7 @@ def render_tab() -> None:
 
     st.divider()
 
-    inner = st.tabs(["Market Regime", "Sector Regime", "Top Combinations", "Explorer", "Rs.1,000 Simulation"])
+    inner = st.tabs(["Market Regime", "Sector Regime", "Top Combinations", "Explorer", "Rs.1,000 Simulation", "Freshness Factor"])
 
     # ── Market Regime ──────────────────────────────────────────────────────────
     with inner[0]:
@@ -574,3 +860,7 @@ than just percentages. A HIGH-tier trade averaging +47% vs STANDARD averaging +2
 very different when expressed as Rs.470 vs Rs.260 expected value per Rs.1,000 deployed.
                 """
             )
+
+    # ── Freshness Factor ───────────────────────────────────────────────────────
+    with inner[5]:
+        _render_freshness_tab(df, strategy_version, dataset_label)
