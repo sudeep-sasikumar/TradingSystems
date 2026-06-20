@@ -39,7 +39,7 @@ from analysis.freshness_tagger import (
 )
 
 SV_SP500 = "sp500_52wh_v1"
-SV_NIFTY = "52wh_v1"
+SV_NIFTY = "52wh_v1_survivorship_10y"
 CUR_YEAR = date.today().year
 
 _REGIME_ORDER = ["bull", "bear", "unknown"]
@@ -700,24 +700,23 @@ def render_tab() -> None:
     st.divider()
 
     # ── Sub-tabs ───────────────────────────────────────────────────────────────
-    backtest_tab, regime_tab, delist_tab, compare_tab, freshness_tab = st.tabs([
-        "Backtest Results",
+    overview_tab, trades_tab, regime_tab, freshness_tab, compare_tab = st.tabs([
+        "Overview",
+        "Trades",
         "Regime Analysis",
-        "Delisted Exits",
-        "vs Nifty 500",
         "Freshness Factor",
+        "vs Nifty 500",
     ])
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 1 — BACKTEST RESULTS
+    # TAB 1 — OVERVIEW
     # ═══════════════════════════════════════════════════════════════════════════
-    with backtest_tab:
+    with overview_tab:
 
         normal = closed[closed["exit_reason"] == "trailing_stop"].copy()
         all_s  = _stats(closed)
         norm_s = _stats(normal)
 
-        # ── Section 1: Full-period stats ───────────────────────────────────
         st.subheader("Full Period — 2006 to present")
 
         col_all, col_norm = st.columns(2)
@@ -728,7 +727,6 @@ def render_tab() -> None:
 
         st.divider()
 
-        # ── Section 2: Equity curve ────────────────────────────────────────
         if not closed.empty:
             st.plotly_chart(
                 _equity_figure(closed, " — S&P 500, 2006–present"),
@@ -737,7 +735,6 @@ def render_tab() -> None:
 
         st.divider()
 
-        # ── Section 3: Year-by-year ────────────────────────────────────────
         st.subheader("Year-by-Year Breakdown")
         st.caption("By year trade was **opened**. Closed trades only.")
 
@@ -761,9 +758,12 @@ def render_tab() -> None:
                 height=min(50 + 35 * len(yt), 750),
             )
 
-        st.divider()
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — TRADES
+    # ═══════════════════════════════════════════════════════════════════════════
+    with trades_tab:
 
-        # ── Section 4: Trade log ───────────────────────────────────────────
+        # ── Trade log ─────────────────────────────────────────────────────
         st.subheader("Trade Log")
 
         if not closed.empty:
@@ -832,6 +832,42 @@ def render_tab() -> None:
                     "entry_price":           st.column_config.NumberColumn("Entry $",   format="%.2f"),
                     "highest_price_reached": st.column_config.NumberColumn("Peak $",    format="%.2f"),
                     "trailing_stop":         st.column_config.NumberColumn("Stop $",    format="%.2f"),
+                },
+            )
+
+        # ── Delisted exits ─────────────────────────────────────────────────
+        if not closed.empty and n_delisted > 0:
+            st.divider()
+            st.subheader(f"Delisted / Acquired Exits ({n_delisted})")
+            st.markdown(
+                "Trades that exited because the stock's price data ended "
+                "≥45 calendar days before today — indicating acquisition, "
+                "bankruptcy, or delisting. Exit at **last available adjusted price**.  \n"
+                "These may be slightly optimistic (real exit could have been at a gap-down "
+                "on announcement day, not captured in daily data)."
+            )
+            delist_df = closed[closed["exit_reason"] == "delisted"].copy()
+            delist_s  = _stats(delist_df)
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Delisted trades", f"{len(delist_df):,}")
+            d2.metric("Win rate",        f"{delist_s['win_pct']:.1f}%" if delist_s else "—")
+            d3.metric("Avg return",      f"{delist_s['avg_ret']:+.2f}%" if delist_s else "—")
+            d4.metric("Gross (%pts)",    f"{delist_s['gross']:+,.0f}" if delist_s else "—")
+            st.dataframe(
+                delist_df[[
+                    "ticker", "entry_date", "exit_date",
+                    "entry_price", "exit_price", "return_pct", "holding_days",
+                ]].sort_values("exit_date"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "ticker":       st.column_config.TextColumn("Ticker",     width=90),
+                    "entry_date":   st.column_config.DateColumn("Entry",      format="YYYY-MM-DD"),
+                    "exit_date":    st.column_config.DateColumn("Last price", format="YYYY-MM-DD"),
+                    "entry_price":  st.column_config.NumberColumn("Entry $",  format="%.2f"),
+                    "exit_price":   st.column_config.NumberColumn("Last $",   format="%.2f"),
+                    "return_pct":   st.column_config.NumberColumn("Return %", format="%+.2f%%"),
+                    "holding_days": st.column_config.NumberColumn("Days",     format="%d"),
                 },
             )
 
@@ -1001,52 +1037,7 @@ def render_tab() -> None:
                 st.plotly_chart(_vix_chart(regime_df), use_container_width=True)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — DELISTED EXITS
-    # ═══════════════════════════════════════════════════════════════════════════
-    with delist_tab:
-        st.subheader("Delisted / Acquired Exits")
-        st.markdown(
-            "Trades that exited because the stock's price data ended "
-            f"≥45 calendar days before today — indicating acquisition, "
-            "bankruptcy, or delisting. Exit at **last available adjusted price**.  \n"
-            "These may be slightly optimistic (real exit could have been at a gap-down "
-            "on announcement day, not captured in daily data)."
-        )
-
-        if closed.empty or n_delisted == 0:
-            st.info("No delisted exits in this backtest.")
-        else:
-            delist_df = closed[closed["exit_reason"] == "delisted"].copy()
-            delist_s  = _stats(delist_df)
-
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Delisted trades",  f"{len(delist_df):,}")
-            d2.metric("Win rate",         f"{delist_s['win_pct']:.1f}%" if delist_s else "—")
-            d3.metric("Avg return",       f"{delist_s['avg_ret']:+.2f}%" if delist_s else "—")
-            d4.metric("Gross (%pts)",     f"{delist_s['gross']:+,.0f}" if delist_s else "—")
-
-            st.divider()
-            st.caption(f"{len(delist_df)} delisted exits — sorted by exit date")
-            st.dataframe(
-                delist_df[[
-                    "ticker", "entry_date", "exit_date",
-                    "entry_price", "exit_price", "return_pct", "holding_days",
-                ]].sort_values("exit_date"),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "ticker":       st.column_config.TextColumn("Ticker",     width=90),
-                    "entry_date":   st.column_config.DateColumn("Entry",      format="YYYY-MM-DD"),
-                    "exit_date":    st.column_config.DateColumn("Last price", format="YYYY-MM-DD"),
-                    "entry_price":  st.column_config.NumberColumn("Entry $",  format="%.2f"),
-                    "exit_price":   st.column_config.NumberColumn("Last $",   format="%.2f"),
-                    "return_pct":   st.column_config.NumberColumn("Return %", format="%+.2f%%"),
-                    "holding_days": st.column_config.NumberColumn("Days",     format="%d"),
-                },
-            )
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — VS NIFTY 500
+    # TAB 5 — VS NIFTY 500
     # ═══════════════════════════════════════════════════════════════════════════
     with compare_tab:
         st.subheader("S&P 500 vs Nifty 500 — Strategy Comparison")
@@ -1054,8 +1045,7 @@ def render_tab() -> None:
             "Same 52-week high strategy rules applied to two different universes.  \n"
             "**Left panel**: S&P 500 full backtest period (2006–present).  \n"
             "**Right panel**: S&P 500 and Nifty 500 over the **overlapping window** "
-            "(2022–present) — the only apples-to-apples comparison since the Nifty "
-            "backtest starts in 2022."
+            "(2019–present) — using the survivorship-corrected Nifty dataset."
         )
         st.caption(
             "Nifty returns are in INR (no currency adjustment). "
@@ -1067,8 +1057,8 @@ def render_tab() -> None:
         # Full-period S&P 500 stats
         all_sp500_s = _stats(closed)
 
-        # 2022-present overlap window
-        overlap_start = date(2022, 1, 1)
+        # 2019-present overlap window (survivorship dataset starts Oct 2019)
+        overlap_start = date(2019, 10, 1)
         sp500_overlap = closed[closed["entry_date"] >= overlap_start] if not closed.empty else pd.DataFrame()
         nifty_overlap = nifty_closed[nifty_closed["entry_date"] >= overlap_start] if not nifty_closed.empty else pd.DataFrame()
 
@@ -1083,7 +1073,7 @@ def render_tab() -> None:
 
         # ── Overlap comparison ─────────────────────────────────────────────
         today_str = date.today().strftime("%Y-%m-%d")
-        st.markdown(f"#### Overlapping Window: 2022-01-01 → {today_str}")
+        st.markdown(f"#### Overlapping Window: Oct 2019 → {today_str}")
 
         if sp500_overlap_s and nifty_overlap_s:
             _compare_block(sp500_overlap_s, nifty_overlap_s)
@@ -1117,7 +1107,7 @@ def render_tab() -> None:
         with ec2:
             if not nifty_overlap.empty:
                 st.plotly_chart(
-                    _equity_figure(nifty_overlap, " — Nifty 500, 2022–present (INR)"),
+                    _equity_figure(nifty_overlap, " — Nifty 500, 2019–present (INR)"),
                     use_container_width=True,
                 )
             else:
@@ -1126,12 +1116,12 @@ def render_tab() -> None:
         st.divider()
         st.info(
             "**Key differences in the two backtests:**  \n"
-            "- **Nifty 500**: survivorship bias (current constituent list only), "
-            "2022–present, INR, 15% artifact threshold  \n"
+            "- **Nifty 500**: survivorship-corrected (actual membership at entry), "
+            "Oct 2019–present, INR  \n"
             "- **S&P 500**: time-varying membership (no survivorship bias), "
-            "2006–present, USD, 25% artifact threshold, delisting handling  \n"
-            "A direct performance comparison requires currency adjustment and a "
-            "matched time window — the overlap panel above is the closest proxy."
+            "2006–present, USD, delisting handling  \n"
+            "A direct performance comparison requires currency adjustment — "
+            "the overlap panel above is the closest proxy."
         )
 
     # ═══════════════════════════════════════════════════════════════════════════
