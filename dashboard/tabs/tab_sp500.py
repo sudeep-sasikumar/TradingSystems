@@ -427,24 +427,48 @@ def _render_sp500_freshness_tab() -> None:
     st.caption(
         "For each trade, measures the trading-day gap between the entry signal and the "
         "previous time the same stock crossed its 252-day high, using only data strictly "
-        "before entry (no lookahead).  Requires `--checkpoint freshness` to be run after "
+        "before entry (no lookahead).  Requires **Setup & Admin → Step 7** to be run after "
         "the backtest."
     )
 
+    col_reload, _ = st.columns([1, 6])
+    with col_reload:
+        if st.button("Reload", key="sp500_fresh_reload"):
+            st.cache_data.clear()
+            st.rerun()
+
+    # Load — show actual error if something goes wrong
+    fresh_df = pd.DataFrame()
+    load_error = None
     try:
         fresh_df = load_freshness_df_sp500()
     except Exception as exc:
-        st.error(f"Could not load freshness data: {exc}")
+        load_error = exc
+
+    if load_error is not None:
+        st.error(
+            f"Error loading freshness data: `{load_error}`\n\n"
+            "Check that the S&P 500 backtest has been run (Setup & Admin → Step 5) "
+            "and freshness has been tagged (Step 7)."
+        )
         return
 
     if fresh_df.empty:
-        st.warning(
-            "No S&P 500 freshness data found.\n\n"
-            "Run:\n```\n"
-            "python SP500/run_sp500_backtest.py --checkpoint freshness\n"
-            "```\n\n"
-            "Or use **Setup & Admin → Step 9** in the dashboard."
-        )
+        # Show DB row count to help distinguish "table empty" from "query bug"
+        from shared.db import get_engine
+        from sqlalchemy import text as _text
+        try:
+            with get_engine().connect() as _c:
+                _n = _c.execute(_text("SELECT COUNT(*) FROM sp500_trade_freshness")).scalar()
+            st.warning(
+                f"No S&P 500 freshness data found (sp500_trade_freshness has {_n:,} rows).  \n\n"
+                "Run **Setup & Admin → Step 7 — Tag All Freshness**, then click **Reload** above."
+            )
+        except Exception:
+            st.warning(
+                "No S&P 500 freshness data found.  \n\n"
+                "Run **Setup & Admin → Step 7 — Tag All Freshness**, then click **Reload** above."
+            )
         return
 
     # Coverage summary

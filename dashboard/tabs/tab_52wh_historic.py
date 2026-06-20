@@ -13,10 +13,16 @@ import plotly.graph_objects as go
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_52WH = _ROOT / "52WeekHigh"
+for _d in (str(_ROOT), str(_52WH)):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 
 from shared.db import get_engine
+from analysis.freshness_tagger import (
+    BUCKET_ORDER as FRESHNESS_BUCKET_ORDER,
+    load_freshness_df,
+)
 
 STRATEGY_VERSION = "52wh_v1_survivorship_10y"
 CUR_YEAR = date.today().year
@@ -38,6 +44,111 @@ def _load_trades() -> pd.DataFrame:
         params={"sv": STRATEGY_VERSION},
     )
     return df
+
+
+_FRESH_NUM_CFG = {
+    "Win%":     st.column_config.NumberColumn(format="%.1f%%"),
+    "Avg Ret%": st.column_config.NumberColumn(format="%.2f%%"),
+    "Median%":  st.column_config.NumberColumn(format="%.2f%%"),
+}
+
+
+def _render_nse_freshness_section() -> None:
+    """NSE Freshness Factor section at the bottom of the Historic tab."""
+    st.markdown("#### Freshness Factor — Time Since Prior 52-Week High (NSE)")
+    st.caption(
+        "For each trade, measures how many trading days elapsed since the same stock "
+        "previously crossed its 252-day high — using only data available before entry (no lookahead).  \n"
+        "Run **Setup & Admin → Step 7** to populate.  "
+        "Full freshness × regime cross-tab is in the **Nifty 500 — Regime Analysis → Freshness Factor** tab."
+    )
+
+    col_reload, _ = st.columns([1, 6])
+    with col_reload:
+        if st.button("Reload", key="nse_fresh_reload"):
+            st.cache_data.clear()
+            st.rerun()
+
+    # Load freshness for the survivorship-corrected dataset (more reliable lookback)
+    fresh_df = pd.DataFrame()
+    load_err = None
+    try:
+        fresh_df = load_freshness_df(STRATEGY_VERSION)
+    except Exception as exc:
+        load_err = exc
+
+    if load_err is not None:
+        st.error(f"Error loading freshness data: `{load_err}`")
+        return
+
+    if fresh_df.empty:
+        st.info(
+            "No freshness data yet for this dataset.  \n"
+            "Go to **Setup & Admin → Step 7 — Tag All Freshness**, then click **Reload** above."
+        )
+        return
+
+    # Coverage metrics
+    cat = fresh_df["freshness_category"].value_counts()
+    n_gap   = int(cat.get("gap_computed", 0))
+    n_foh   = int(cat.get("first_observed_high", 0))
+    n_insuf = int(cat.get("insufficient_history", 0))
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Total Tagged",          f"{len(fresh_df):,}")
+    mc2.metric("Gap Computed",          f"{n_gap:,}")
+    mc3.metric("First Observed High",   f"{n_foh:,}")
+    mc4.metric("Insufficient History",  f"{n_insuf:,}")
+
+    st.caption(
+        "Price cache starts 2018-01-01 for this dataset.  "
+        "`first_observed_high` = no prior 52-week high found in ~6 years of lookback."
+    )
+
+    # Bucket performance table
+    bkt_rows = []
+    for bkt in FRESHNESS_BUCKET_ORDER:
+        grp = fresh_df[fresh_df["freshness_bucket"] == bkt]
+        if len(grp) == 0:
+            continue
+        n    = len(grp)
+        wins = (grp["return_pct"] > 0).sum()
+        bkt_rows.append({
+            "Freshness Bucket": bkt,
+            "n":        n,
+            "Win%":     round(wins / n * 100, 1),
+            "Avg Ret%": round(float(grp["return_pct"].mean()), 2),
+            "Median%":  round(float(grp["return_pct"].median()), 2),
+            "Avg Days": int(round(grp["holding_days"].mean())),
+            "Note":     "* n<30" if n < 30 else "",
+        })
+
+    if not bkt_rows:
+        st.info("No bucket data yet.")
+        return
+
+    st.dataframe(pd.DataFrame(bkt_rows), hide_index=True, use_container_width=False,
+                 column_config=_FRESH_NUM_CFG)
+
+    # Bar chart — gap-computed buckets only
+    gap_rows = [r for r in bkt_rows
+                if r["Freshness Bucket"] not in ("insufficient_history", "first_observed_high")]
+    if gap_rows:
+        fig = go.Figure(go.Bar(
+            x=[r["Freshness Bucket"] for r in gap_rows],
+            y=[r["Avg Ret%"] for r in gap_rows],
+            marker_color=["#2ecc71" if (r["Avg Ret%"] or 0) >= 0 else "#e74c3c" for r in gap_rows],
+            text=[f"{r['Avg Ret%']:+.1f}%" for r in gap_rows],
+            textposition="outside",
+        ))
+        fig.update_layout(
+            title="Avg Return by Freshness Bucket (NSE, gap-computed trades)",
+            xaxis_title="Freshness bucket",
+            yaxis_title="Avg Return %",
+            height=280,
+            margin=dict(t=50, b=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_tab():
@@ -199,3 +310,6 @@ def render_tab():
         f"Showing {len(view):,} of {len(df):,} trades  |  "
         "Illustrative, equal-weight, no capital constraints — not a real portfolio simulation"
     )
+
+    st.divider()
+    _render_nse_freshness_section()

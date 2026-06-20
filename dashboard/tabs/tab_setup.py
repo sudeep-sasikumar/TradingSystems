@@ -172,18 +172,56 @@ def render_tab() -> None:
 
     st.divider()
 
-    # ── Step 7 — SP500 scanner test run ───────────────────────────────────────
-    st.subheader("Step 7 — S&P 500 Scanner Test Run (CP-S5)")
+    # ── Step 7 — All freshness ─────────────────────────────────────────────────
+    st.subheader("Step 7 — Tag All Freshness Factor (NSE + S&P 500)")
+    st.markdown(
+        "Computes the trading-day gap between each trade's entry and the previous time the "
+        "same stock made a new 52-week high — for all three backtest datasets at once.  \n"
+        "- **NSE (original):** stores freshness in `trade_regime_tags` · run after Step 3  \n"
+        "- **NSE (historic):** same table, historic dataset · run after Step 3  \n"
+        "- **S&P 500:** stores freshness in `sp500_trade_freshness` · run after Step 5  \n"
+        "Safe to re-run.  Re-run NSE steps if Step 3 (regime tags) is re-run.  \n"
+        "**Est. runtime:** ~10–25 min total (reads parquet cache only, no network calls).  \n"
+        "**After it completes:** click **Reload** in the **NSE Historic → Freshness Factor** "
+        "section or **S&P 500 → Freshness Factor** tab to see updated data."
+    )
+    if st.button("▶  Tag All Freshness (NSE + S&P 500)", key="btn_freshness_all", type="primary"):
+        _run_step(
+            label="Freshness — NSE original (52wh_v1)",
+            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
+                 "--strategy-version", "52wh_v1"],
+            timeout=600,
+        )
+        _run_step(
+            label="Freshness — NSE historic (52wh_v1_survivorship_10y)",
+            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
+                 "--strategy-version", "52wh_v1_survivorship_10y"],
+            timeout=600,
+        )
+        _run_step(
+            label="Freshness — S&P 500 (sp500_52wh_v1)",
+            cmd=[_PY, _RUN_SP500, "--checkpoint", "freshness"],
+            timeout=900,
+        )
+        st.info(
+            "Done — click **Reload** in the freshness tabs to see results:  \n"
+            "- **Nifty 500 — Historic** → scroll to Freshness Factor section  \n"
+            "- **S&P 500** → Freshness Factor tab  \n"
+            "- **Nifty 500 — Regime Analysis** → Freshness Factor tab (full cross-tab)"
+        )
+
+    st.divider()
+
+    # ── Optional — Scanner test run ───────────────────────────────────────────
+    st.subheader("Optional — Test S&P 500 Scanner")
     st.markdown(
         "Runs the S&P 500 EOD scanner **immediately** (bypasses the 21:30 UTC schedule).  \n"
-        "Downloads today's prices for current S&P 500 members, detects new 52-week highs, "
-        "and fires Telegram alerts via the bot.  \n"
-        "The scanner normally runs automatically at **21:30 UTC Mon–Fri** (see Docker section).  \n"
+        "The scanner normally runs automatically at **21:30 UTC Mon–Fri** inside Docker.  \n"
         "⚠️  Only run this after US market close \\(after 9 PM UTC\\) to see today's close prices\\."
     )
     if st.button("▶  Test S&P 500 Scanner (--run-now)", key="btn_sp500_scan_test"):
         _run_step(
-            label="S&P 500 Scanner test run (CP-S5)",
+            label="S&P 500 Scanner test run",
             cmd=[_PY, _RUN_SP500_SCAN, "--run-now"],
             timeout=900,
         )
@@ -191,59 +229,15 @@ def render_tab() -> None:
 
     st.divider()
 
-    # ── Step 8 — Nifty freshness ───────────────────────────────────────────────
-    st.subheader("Step 8 — Tag Freshness Factor (Nifty, both datasets)")
-    st.markdown(
-        "Computes the trading-day gap between each trade's entry and the previous time the "
-        "same stock made a new 52-week high, using only data available at the time (no lookahead).  \n"
-        "Stores results in `trade_regime_tags` (adds 4 freshness columns).  \n"
-        "**Run after Step 3** (regime tags must exist).  Re-run if Step 3 is re-run.  \n"
-        "**Est. runtime:** ~2–5 min per dataset (reads parquet cache, no network calls)"
-    )
-    if st.button("▶  Tag Nifty Freshness (both datasets)", key="btn_freshness_nifty"):
-        _run_step(
-            label="Freshness — 52wh_v1 (original)",
-            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
-                 "--strategy-version", "52wh_v1"],
-            timeout=600,
-        )
-        _run_step(
-            label="Freshness — 52wh_v1_survivorship_10y (historic)",
-            cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
-                 "--strategy-version", "52wh_v1_survivorship_10y"],
-            timeout=600,
-        )
-        st.info("Done — open the **Regime Analysis → Freshness Factor** tab to see results.")
-
-    st.divider()
-
-    # ── Step 9 — S&P 500 freshness ────────────────────────────────────────────
-    st.subheader("Step 9 — Tag Freshness Factor (S&P 500)")
-    st.markdown(
-        "Computes freshness factor for all `sp500_52wh_v1` backtest trades and stores "
-        "results in the `sp500_trade_freshness` table.  \n"
-        "**Run after Step 5** (S&P 500 backtest must be complete).  \n"
-        "**Est. runtime:** ~5–15 min (reads parquet cache for ~900 tickers, no network calls)"
-    )
-    if st.button("▶  Tag S&P 500 Freshness", key="btn_freshness_sp500"):
-        _run_step(
-            label="S&P 500 Freshness Factor",
-            cmd=[_PY, _RUN_SP500, "--checkpoint", "freshness"],
-            timeout=900,
-        )
-        st.info("Done — open the **S&P 500 → Freshness Factor** tab to see results.")
-
-    st.divider()
-
     # ── Run All ────────────────────────────────────────────────────────────────
-    st.subheader("Run Everything (Steps 1 → 9)")
+    st.subheader("Run Everything (Steps 1 → 7)")
     st.warning(
         "Runs all Nifty + S&P 500 steps sequentially, including freshness tagging. "
         "**Total runtime: 100–165 min** on first run (price downloads for both universes). "
         "Do not close this browser tab. If you prefer, SSH into the VPS and use the CLI "
         "commands in the Advanced section below instead."
     )
-    if st.button("▶  Run Everything (Steps 1–9)", key="btn_all", type="primary"):
+    if st.button("▶  Run Everything (Steps 1–7)", key="btn_all", type="primary"):
         st.markdown("**Step 1 — Original Backtest**")
         _run_step(
             label="Original Backtest (52wh_v1)",
@@ -295,27 +289,30 @@ def render_tab() -> None:
             cmd=[_PY, _RUN_SP500, "--checkpoint", "regime"],
             timeout=300,
         )
-        st.markdown("**Step 7 — Nifty Freshness (original)**")
+        st.markdown("**Step 7a — NSE Freshness (original)**")
         _run_step(
             label="Freshness — 52wh_v1",
             cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
                  "--strategy-version", "52wh_v1"],
             timeout=600,
         )
-        st.markdown("**Step 8 — Nifty Freshness (historic)**")
+        st.markdown("**Step 7b — NSE Freshness (historic)**")
         _run_step(
             label="Freshness — 52wh_v1_survivorship_10y",
             cmd=[_PY, _RUN_REGIME, "--checkpoint", "freshness",
                  "--strategy-version", "52wh_v1_survivorship_10y"],
             timeout=600,
         )
-        st.markdown("**Step 9 — S&P 500 Freshness**")
+        st.markdown("**Step 7c — S&P 500 Freshness**")
         _run_step(
             label="S&P 500 Freshness Factor",
             cmd=[_PY, _RUN_SP500, "--checkpoint", "freshness"],
             timeout=900,
         )
-        st.success("All steps complete — click **Refresh Status** at the top to verify.")
+        st.success(
+            "All steps complete — click **Refresh Status** at the top, then **Reload** "
+            "in the freshness tabs to see results."
+        )
 
     st.divider()
     _advanced_section()
@@ -426,15 +423,10 @@ def _db_status() -> None:
             "**Next step (S&P 500):** Run **Step 6 — S&P 500 Regime** below. "
             "Your backtest is complete; regime tags enable the Regime Analysis sub-tab. (~1–2 min)"
         )
-    if n_sp500_trades > 500 and n_sp500_freshness == 0:
+    if (n_sp500_trades > 500 and n_sp500_freshness == 0) or (n_tags_hist > 500 and n_fresh_hist == 0):
         st.info(
-            "**Next step (S&P 500 freshness):** Run **Step 9 — Tag S&P 500 Freshness** below. "
-            "Your backtest is complete; freshness data enables the Freshness Factor sub-tab. (~5–15 min)"
-        )
-    if n_tags_hist > 500 and n_fresh_hist == 0:
-        st.info(
-            "**Next step (Nifty freshness):** Run **Step 8 — Tag Nifty Freshness** below. "
-            "Regime tags are present; freshness data enables the Freshness Factor sub-tab. (~2–5 min)"
+            "**Next step:** Run **Step 7 — Tag All Freshness (NSE + S&P 500)** below. "
+            "Backtest and regime data are present; freshness enables the Freshness Factor sections. (~10–25 min)"
         )
     if n_orig > 500 and n_tags_orig == 0:
         st.info(
@@ -514,15 +506,13 @@ docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint ba
 # Step 6: S&P 500 regime analysis (~1-2 min, downloads ^GSPC + ^VIX)
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint regime
 
-# Step 7: Scanner test run (run after US market close)
-docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
-
-# Step 8: Nifty freshness factor (~2-5 min per dataset, must run after Step 3)
+# Step 7: Tag All Freshness (NSE + S&P 500, ~10-25 min, after Steps 3 and 5)
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint freshness --strategy-version 52wh_v1
 docker compose exec dashboard python 52WeekHigh/run_regime_analysis.py --checkpoint freshness --strategy-version 52wh_v1_survivorship_10y
-
-# Step 9: S&P 500 freshness factor (~5-15 min, must run after Step 5)
 docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint freshness
+
+# Optional: S&P 500 scanner test run (after US market close)
+docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
 ```
 
 **S&P 500 scanner continuous service (runs in `sp500_scanner` Docker container):**
