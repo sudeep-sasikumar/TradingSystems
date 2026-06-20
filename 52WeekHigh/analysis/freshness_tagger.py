@@ -649,10 +649,9 @@ def tag_freshness_sp500() -> dict:
         if (i + 1) % 500 == 0 or (i + 1) == len(trades):
             logger.info("  … %d / %d done", i + 1, len(trades))
 
-    # DELETE + INSERT (idempotent)
-    trade_ids = [r["trade_id"] for r in records]
+    # Full replace — truncate then bulk insert (safe to re-run)
     insert_stmt = text("""
-        INSERT OR REPLACE INTO sp500_trade_freshness
+        INSERT INTO sp500_trade_freshness
             (trade_id, ticker, entry_date,
              freshness_category, freshness_gap_td, freshness_gap_cal, freshness_prior_date,
              created_at)
@@ -662,11 +661,7 @@ def tag_freshness_sp500() -> dict:
              datetime('now'))
     """)
     with engine.connect() as conn:
-        if trade_ids:
-            conn.execute(
-                text("DELETE FROM sp500_trade_freshness WHERE trade_id IN :ids"),
-                {"ids": tuple(trade_ids)},
-            )
+        conn.execute(text("DELETE FROM sp500_trade_freshness"))
         conn.execute(insert_stmt, records)
         conn.commit()
 
