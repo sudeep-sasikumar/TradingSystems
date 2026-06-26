@@ -1,0 +1,24 @@
+# Python runtime artifacts
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Secrets — injected at runtime via docker-compose env_file
+.env
+
+# Git
+.git/
+.gitignore
+
+# Exclude runtime-generated data — do NOT exclude data/reconstitution_pdfs/
+# (those PDFs are committed reference data and must be bundled in the dashboard image)
+data/trading.db
+data/cache/
+
+# Dev-only scripts not needed in production images
+diag_corp_actions.py

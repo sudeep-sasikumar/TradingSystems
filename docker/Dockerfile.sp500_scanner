@@ -11,6 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# APScheduler inside scanner.py handles the hourly 9:15–15:30 IST schedule.
-# No cron needed — the process runs continuously and sleeps between market hours.
-CMD ["python", "52WeekHigh/scanner/scanner.py"]
+# APScheduler inside scanner.py handles the 21:30 UTC Mon–Fri schedule.
+# No cron needed — the process runs continuously and sleeps between market sessions.
+CMD ["python", "SP500/scanner/scanner.py"]

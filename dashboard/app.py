@@ -4,21 +4,23 @@ TradingSystems Dashboard — Main Entry Point
 Run with:
     streamlit run dashboard/app.py
 
-Tab structure is intentionally defined here even for phases not yet built.
-To add a new strategy phase: implement its tab module in dashboard/tabs/,
-import the render function here, and add it to the tabs list below.
+3-tab structure:
+  Nifty 500    — survivorship-corrected backtest + live + regime + freshness
+  S&P 500      — full backtest + regime + freshness + comparison
+  Setup & Admin — data setup, DB status, CLI reference
 """
 import sys
 from pathlib import Path
 
-# Make 'shared', 'tabs' importable
 _ROOT = Path(__file__).resolve().parent.parent
 _DASH = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_DASH))
 
 import streamlit as st
-from tabs.tab_52wh import render_tab as render_52wh
+from tabs.tab_nifty  import render_tab as render_nifty
+from tabs.tab_sp500  import render_tab as render_sp500
+from tabs.tab_setup  import render_tab as render_setup
 
 st.set_page_config(
     page_title="TradingSystems Dashboard",
@@ -27,15 +29,19 @@ st.set_page_config(
 )
 
 st.title("TradingSystems Dashboard")
-st.caption("Phase 1 — 52-Week High Momentum Strategy | NSE / Nifty 500")
+st.caption("52-Week High Momentum Strategy | NSE Nifty 500 + S&P 500")
 
-tabs = st.tabs(["52-Week High System"])
+tabs = st.tabs([
+    "Nifty 500",
+    "S&P 500",
+    "Setup & Admin",
+])
 
 with tabs[0]:
-    render_52wh()
+    render_nifty()
 
-# Phase 2+: add tab modules here
-# from tabs.tab_52wh_indicator import render_tab as render_52whi
-# tabs = st.tabs(["52-Week High System", "52WH + Indicator"])
-# with tabs[1]:
-#     render_52whi()
+with tabs[1]:
+    render_sp500()
+
+with tabs[2]:
+    render_setup()

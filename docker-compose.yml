@@ -1,53 +1,87 @@
-version: "3.9"
-
-# ── Service Architecture ─────────────────────────────────────────────────────
-#
-# scanner (scheduled job):
-#   Runs briefly every hour during NSE market hours (9:15–15:30 IST /
-#   03:45–10:00 UTC), checks for signals and stop-loss breaches, then
-#   idles until the next scheduled run. APScheduler handles timing internally.
-#   Can be restart: unless-stopped since no persistent connections needed.
-#
-# bot (persistent service):
-#   MUST remain running at all times. python-telegram-bot uses a long-poll
-#   loop waiting for user button-press callbacks. If this process exits,
-#   all pending [Accept]/[Reject] callbacks are lost. This is why it cannot
-#   be a cron job. Use restart: always.
-#
-# dashboard (web server):
-#   Streamlit server — always running on port 8502. Reads from the shared
-#   SQLite DB (no separate data pipeline).
-#
-# All three services share the same ./data volume so they read/write the
-# same SQLite database (trading.db) and cache (nifty500.csv).
-# ─────────────────────────────────────────────────────────────────────────────
-
 services:
+
   scanner:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-scanner:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.scanner
-    env_file: .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   bot:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-bot:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.bot
-    env_file: .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
-    restart: always   # always restart — must stay alive for callbacks
+      - trading_data:/app/data
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  sp500_scanner:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-sp500scanner:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sp500_scanner
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      - SP500_MAX_CONCURRENT_POSITIONS=${SP500_MAX_CONCURRENT_POSITIONS:-20}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - trading_data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   dashboard:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-dashboard:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.dashboard
-    env_file: .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data
+      - trading_data:/app/data
     ports:
       - "${DASHBOARD_PORT:-8502}:8502"
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8502/_stcore/health')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  trading_data:
