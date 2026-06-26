@@ -124,13 +124,13 @@ def cmd_backtest() -> None:
     print(f"  {len(ticker_data)} tickers downloaded. data_end_date = {data_end}")
 
     print("\n-- Step 3: Download SPY + sector ETF data -------------------------")
-    index_result = fetch_index_data(INDEX_TICKERS, start=LOOKBACK_START, use_cache=True)
-    spy_df = index_result.data.get("SPY")
+    index_data = fetch_index_data(INDEX_TICKERS, start=LOOKBACK_START, use_cache=True)
+    spy_df = index_data.get("SPY")
     if spy_df is None or spy_df.empty:
         print("  ERROR: SPY data not available. Cannot run backtest.")
         sys.exit(1)
     sector_dfs = {
-        etf: df for etf, df in index_result.data.items()
+        etf: df for etf, df in index_data.items()
         if etf not in ("SPY", "QQQ") and not df.empty
     }
     print(f"  SPY: {len(spy_df)} bars | {len(sector_dfs)} sector ETFs loaded")
@@ -159,7 +159,7 @@ def cmd_backtest() -> None:
             df_out = trades_to_df(res.trades)
             out_path = output_dir / f"backtest_v{version}_trades.csv"
             df_out.to_csv(out_path, index=False)
-            print(f"  Saved {len(res.trades)} trades for Version {version} → {out_path}")
+            print(f"  Saved {len(res.trades)} trades for Version {version} -> {out_path}")
 
     print("\nDone. Research estimate only — see survivorship bias note above.")
 

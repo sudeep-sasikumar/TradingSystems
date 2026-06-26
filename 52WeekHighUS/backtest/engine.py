@@ -222,12 +222,20 @@ def _v_a_signal(ticker: str, signal_date: date, row: pd.Series,
 
 
 # ── Version B signal evaluation ────────────────────────────────────────────────
+# Return type: (signal_or_None, skip_reason_or_None)
+# skip_reason: "sl_pct" | "qty" | None (None means signal generated)
+# NOTE: Version B intentionally omits the R:R check — that gate (B5 full spec)
+# belongs only in Version C via evaluate_ticker.  B applies B4 + the 6% SL% cap
+# only, so the signal count comparison shows purely the effect of the stop formula.
 
-def _v_b_signal(ticker: str, signal_date: date, row: pd.Series,
-                config: SignalConfig) -> Optional[_Signal]:
+def _v_b_signal(
+    ticker: str, signal_date: date, row: pd.Series, config: SignalConfig,
+) -> tuple[Optional[_Signal], Optional[str]]:
     """
-    VERSION B — Corrected stop (MIN + 6% cap) + capital cap.
-    No B1 (SPY regime), no B2/B3 (trend/golden cross). Only B4 + B5.
+    VERSION B — Corrected stop (MIN + 6% SL cap) + capital cap.
+    Gates applied: B4 (fresh breakout) + 6% SL% cap.
+    R:R check excluded — that belongs in Version C (full spec).
+    Returns (signal, skip_reason) where skip_reason is None on success.
     """
     close      = _f(row, "Close")
     low_today  = _f(row, "Low")
@@ -236,36 +244,33 @@ def _v_b_signal(ticker: str, signal_date: date, row: pd.Series,
     swing_low5 = _f(row, "SwingLow5")
 
     if any(v is None for v in [close, low_today, atr14, prior_252h]):
-        return None
+        return None, None   # missing data — not a candidate, don't count as skip
+
     if prior_252h <= 0 or close <= prior_252h * BREAKOUT_BUFFER:
-        return None
+        return None, None   # B4 failed — not a breakout candidate
 
     entry = close * ENTRY_BUFFER
 
-    # Correct: MIN
+    # Correct: MIN (not MAX like Version A)
     sl_base = min(low_today, swing_low5) if swing_low5 is not None else low_today
     structural_sl = sl_base * SL_BUFFER
 
     rps = entry - structural_sl
     if rps <= 0:
-        return None
+        return None, None
 
     sl_pct = rps / entry * 100.0
     if sl_pct > SL_PCT_CAP:
-        return None   # 6% cap enforced
+        return None, "sl_pct"   # B5 partial: 6% cap (R:R excluded — see Version C)
 
     t1 = entry + T1_ATR_MULT * atr14
     t2 = entry + T2_ATR_MULT * atr14
-    rr_t1 = (t1 - entry) / rps
-    rr_t2 = (t2 - entry) / rps
-    if rr_t1 < RR_T1_MIN or rr_t2 < RR_T2_MIN:
-        return None
 
     qty_risk = math.floor(config.risk_budget() / rps)
     qty_cap  = math.floor(config.max_capital_per_trade / entry)
     qty      = min(qty_risk, qty_cap)
     if qty <= 0:
-        return None
+        return None, "qty"
     qty_t1 = math.floor(qty / 2)
 
     return _Signal(
@@ -274,7 +279,7 @@ def _v_b_signal(ticker: str, signal_date: date, row: pd.Series,
         t1=t1, t2=t2, risk_per_share=rps, sl_pct=sl_pct,
         qty_t1=qty_t1, qty_trailing=qty - qty_t1, final_qty=qty,
         version="B",
-    )
+    ), None
 
 
 # ── Version C signal evaluation ────────────────────────────────────────────────
@@ -874,8 +879,10 @@ def run_backtest(
                         continue
 
                 elif version == "B":
-                    sig = _v_b_signal(ticker, today, row, config)
+                    sig, skip_reason = _v_b_signal(ticker, today, row, config)
                     if sig is None:
+                        if skip_reason == "sl_pct":
+                            results["B"].signals_skipped_sl_pct += 1
                         continue
 
                 else:  # C
@@ -885,19 +892,34 @@ def run_backtest(
                         pd.DataFrame(prior_signals_c, columns=["ticker", "signal_date"])
                         if prior_signals_c else None
                     )
-                    sig = _v_c_signal(
+                    # Call evaluate_ticker directly so we can count skip reasons
+                    r_c = evaluate_ticker(
                         ticker=ticker,
                         company_name=m.get("company_name", ticker),
                         gics_sector=m.get("gics_sector", ""),
-                        signal_date=today,
                         ticker_df=ticker_data[ticker],
                         spy_df=spy_df,
                         sector_etf_df=sector_df_slice,
                         prior_signals_df=prior_df,
                         config=config,
+                        as_of_date=today,
+                        fetch_earnings=False,
                     )
-                    if sig is None:
+                    if r_c.action != "SIGNAL":
+                        if r_c.action == "SKIP_HARD_GATE":
+                            results["C"].signals_skipped_hard_gate += 1
+                        elif r_c.action == "SKIP_RISK":
+                            results["C"].signals_skipped_sl_pct += 1
+                        # SKIP_COOLDOWN / SKIP_DATA: not counted (not a breakout candidate)
                         continue
+                    sig = _Signal(
+                        ticker=ticker, signal_date=today,
+                        entry_level=r_c.entry, structural_sl=r_c.structural_sl,
+                        atr14=r_c.atr14, t1=r_c.t1, t2=r_c.t2,
+                        risk_per_share=r_c.risk_per_share, sl_pct=r_c.sl_pct,
+                        qty_t1=r_c.qty_t1, qty_trailing=r_c.qty_trailing,
+                        final_qty=r_c.final_qty, version="C", tier=r_c.tier or "C",
+                    )
                     prior_signals_c.append({"ticker": ticker, "signal_date": today})
 
                 results[version].signals_generated += 1
