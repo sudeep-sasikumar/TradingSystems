@@ -6,11 +6,11 @@
 
 ## Current State
 
-- **Date last updated**: 2026-06-19
-- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete) + Freshness analysis (Nifty + S&P 500 complete)
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1, CP-S2, CP-S3, CP-S4, CP-S5, CP-S6, CP-S7 + Freshness (Nifty + SP500)
+- **Date last updated**: 2026-06-26
+- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete) + Freshness (Nifty + SP500 complete) + **52WeekHighUS US Breakout System (Session 1 complete)**
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1–S7 + Freshness + **52WHU-S1**
+- **Next (52WeekHighUS)**: Session 2 — backtest engine (3-version comparison, Part I of spec)
 - **Next action (VPS)**: git pull → docker compose up --build -d → click "Run Everything (Steps 1–9)" in Setup & Admin tab
-- **Setup button**: Steps 1-9 in Setup & Admin tab — runs all Nifty + S&P 500 backtests, regime tags, and freshness in one click (~100-165 min)
 
 ---
 
@@ -607,6 +607,45 @@ button in Setup & Admin that populates all data in the correct order for a fresh
 **To populate on VPS (after git pull + docker compose up --build -d):**
 Open dashboard → Setup & Admin → click **"Run Everything (Steps 1–9)"**
 Or run the individual CLI commands shown in the Advanced section.
+
+---
+
+### ✅ 52WHU-S1 — US S&P 500 Breakout System: Session 1 (complete, 2026-06-26)
+
+**New folder**: `52WeekHighUS/` — sibling to `52WeekHigh/` and `SP500/`.
+**Folder name rationale**: mirrors `52WeekHigh/` naming convention; no collision with existing `SP500/` project.
+**Dashboard tab label**: "US S&P 500 Breakout" (to be added in Session 4).
+**Strategy version**: `"52whu_v1"`.
+**DB file**: `data/sp500_us_breakout.db` — separate from `trading.db` (existing Nifty/SP500 system unaffected).
+
+**Files created:**
+- `52WeekHighUS/__init__.py`
+- `52WeekHighUS/models.py` — SQLAlchemy tables: `us52wh_signals`, `us52wh_scan_runs`, `us52wh_positions`
+- `52WeekHighUS/db.py` — engine/session factory pointing at `sp500_us_breakout.db`
+- `52WeekHighUS/universe.py` — S&P 500 fetch from Wikipedia (pandas read_html); GICS sector → ETF mapping; 7-day cache with refresh
+- `52WeekHighUS/data_loader.py` — batch yfinance OHLCV download (50/chunk, tenacity retry); Wilder ATR-14; SMA50/200/EMA14; Prior252High (shift(1).rolling(252).max() on High); AvgVol20; SwingLow5 (prior 5 days, today excluded); RS3M (63-day); partial-bar detection via 16:15 ET buffer; per-ticker cache
+- `52WeekHighUS/signal_logic.py` — 10-point checklist (B1-B4 hard gates, B5 risk gate, B6-B10 graded checks); Part C formulas (MIN stop, capital-capped sizing); Part D tier assignment; cooldown (20 trading days); earnings best-effort
+- `52WeekHighUS/run_backtest.py` — CLI with `--checkpoint universe|setup|backtest`
+- `52WeekHighUS/tests/__init__.py`
+- `52WeekHighUS/tests/test_signal.py` — 25 unit tests (all pass)
+
+**Files modified:**
+- `requirements.txt` — added `lxml>=4.9.0`, `pytest>=7.0.0`
+
+**Key verified behaviors (25 tests, all green):**
+- StructuralSL uses MIN(TodayCandleLow, 5DaySwingLow) × 0.997 — confirmed NOT MAX
+- FinalQty = MIN(QtyRiskBased, QtyCapitalBased) — capital cap enforced
+- Cooldown suppresses within ~30 calendar days (≈20 trading days)
+- Each hard gate (B1-B4) blocks independently
+- Tier A (≥4), B (2-3), C (0-1) — correct
+- Missing earnings → 'not verified', signal still generated
+- Empty/NaN/short data → SKIP result, no exception raised
+
+**Universe**: 503 constituents fetched from Wikipedia; all 11 GICS sectors mapped to ETFs.
+
+**Import note**: `52WeekHighUS` starts with a digit so Python can't use it as a direct package name.
+Pattern (matches existing `52WeekHigh/`): add `_ROOT` and `_ROOT/52WeekHighUS` to sys.path; use flat absolute imports.
+`signal_logic.py` (not `signal.py`) avoids shadowing Python's built-in `signal` module.
 
 ---
 

@@ -29,3 +29,7 @@ plotly>=5.20.0
 
 # ─── PDF parsing (historic universe reconstitution PDFs) ──────────────────────
 pdfplumber>=0.11.0
+
+# ─── US S&P 500 Breakout System (52WeekHighUS) ────────────────────────────────
+lxml>=4.9.0         # pandas read_html for Wikipedia S&P 500 universe list
+pytest>=7.0.0       # unit tests (52WeekHighUS/tests/)
