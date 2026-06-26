@@ -98,19 +98,93 @@ def _make_breakout_df(
     current_close: float = 98.0,
 ) -> pd.DataFrame:
     """
-    Ticker with today's close clearly above Prior252High × BREAKOUT_BUFFER,
-    in an uptrend (SMA50 > SMA200, close > both).
+    A consolidation-breakout ticker that produces action='SIGNAL' when called
+    with a bullish SPY and no cooldown suppression.
+
+    Pattern (for hard-gate tests, this is the "good" baseline where only the
+    specific gate under test fails):
+      - Rows 0-289:   uptrend from prior_high_base*0.55 to consol_level
+      - Rows 290-343: wide-range consolidation (H-L ≈ 8% of consol_level → large ATR)
+      - Rows 344-348: pre-breakout consolidation just below current_close/1.0025
+      - Row 349:      today breakout close = current_close
+
+    Guarantees: Prior252High < current_close, SL% < 6%, RR_T1 > 1.5.
     """
     n = 350
     dates = pd.bdate_range(end=_EVAL_DATE, periods=n)
 
-    # Uptrend: start at prior_high_base * 0.7, end at current_close
-    closes = np.linspace(prior_high_base * 0.7, current_close, n)
-    # But cap the second-to-last 252 highs so Prior252High stays at prior_high_base
-    closes[-253:-1] = np.clip(closes[-253:-1], 0, prior_high_base)
+    consol_level     = prior_high_base * 0.967   # wide consol just below prior_high_base
+    pre_bk_level     = current_close * 0.979     # pre-breakout level close to current_close
+    consol_h_half    = prior_high_base * 0.044   # H-L half-range for wide consol → ATR ≈ 8%
 
-    highs = closes * 1.01
-    lows  = closes * 0.97
+    hist       = np.linspace(prior_high_base * 0.55, consol_level, 290)
+    wide_consol = np.full(54, consol_level)
+    pre_bk      = np.full(5,  pre_bk_level)
+    closes      = np.concatenate([hist, wide_consol, pre_bk, [current_close]])  # 350 rows
+
+    # Highs
+    highs = closes.copy()
+    highs[:290]    = np.minimum(hist * 1.01, consol_level * 1.005)
+    highs[290:344] = consol_level + consol_h_half
+    highs[344:349] = pre_bk_level * 1.003   # tight, below current_close / BREAKOUT_BUFFER
+    highs[-1]      = current_close * 1.01
+
+    # Lows
+    lows = closes.copy()
+    lows[:290]    = hist * 0.97
+    lows[290:344] = consol_level - consol_h_half
+    lows[344:349] = pre_bk_level * 0.975
+    lows[-1]      = current_close * 0.975
+
+    df = pd.DataFrame(
+        {
+            "Open":   closes * 0.99,
+            "High":   highs,
+            "Low":    lows,
+            "Close":  closes,
+            "Volume": 3_000_000,
+        },
+        index=dates,
+    )
+    return compute_indicators(df)
+
+
+def _make_signal_df(
+    close: float = 100.0,
+    today_low: float = 99.0,
+    swing_low_5: float = 97.5,
+) -> pd.DataFrame:
+    """
+    Build a DataFrame that is explicitly engineered to produce action='SIGNAL'.
+
+    Pattern: uptrend → consolidation (wide H-L for ATR) → today's breakout.
+    The prior-5 lows are explicitly overridden to swing_low_5 so the test can
+    control StructuralSL while still passing all gates.
+
+    With defaults: close=100, today_low=99, swing_low_5=97.5
+      Entry = 100.1, SL = 97.5×0.997 = 97.21, SL% ≈ 2.9% ✓
+      ATR ≈ 4.2, RR_T1 ≈ 2.9 ✓
+    """
+    n = 350
+    dates = pd.bdate_range(end=_EVAL_DATE, periods=n)
+
+    # Uptrend (290 rows), then consolidation at 97 (59 rows), then breakout today
+    hist   = np.linspace(65.0, 97.0, 290)
+    consol = np.full(59, 97.0)
+    closes = np.concatenate([hist, consol, [close]])  # 350 rows
+
+    # Highs: cap hist below 99.5; consol H = 99.5 (just under close/BREAKOUT_BUFFER=99.75)
+    highs = closes.copy()
+    highs[:290]    = np.minimum(hist * 1.01, 99.4)
+    highs[290:349] = 99.5
+    highs[-1]      = close * 1.01
+
+    # Lows: wide consol for ATR; override prior-5 to swing_low_5
+    lows = closes.copy()
+    lows[:290]    = hist * 0.97
+    lows[290:349] = 94.5      # wide range (99.5-94.5=5) → ATR ≈ 5
+    lows[344:349] = swing_low_5
+    lows[-1]      = today_low
 
     df = pd.DataFrame(
         {
@@ -167,22 +241,34 @@ class TestStructuralSL:
         close: float = 105.0,
     ) -> pd.DataFrame:
         """
-        DataFrame where today's Low = today_low and the prior 5 days' lows
-        = swing_low_val, with a breakout close so B1-B4 can pass.
+        Consolidation-breakout DataFrame where today's Low = today_low and the
+        prior 5 days' lows = swing_low_val.  All values kept within SL% ≤ 6%
+        so the signal reaches the formula assertions.
+
+        Pattern with close=105:
+          - Rows 0-289:   uptrend 70 → 102
+          - Rows 290-348: consolidation at 102, H=104.5, L=99.5 (ATR ≈ 4.5)
+          - Rows 344-348: lows overridden to swing_low_val  (SwingLow5 = swing_low_val)
+          - Row 349:      close=105, L=today_low
+        Prior252High = 104.5 < 105/1.0025 = 104.74 → B4 passes.
         """
         n = 350
         dates = pd.bdate_range(end=_EVAL_DATE, periods=n)
 
-        prior_close = close * 0.88   # flat prior close so current is a new 252H
-        closes = np.full(n, prior_close)
-        closes[-1] = close
+        hist   = np.linspace(70.0, 102.0, 290)
+        consol = np.full(59, 102.0)
+        closes = np.concatenate([hist, consol, [close]])  # 350 rows
 
-        highs = closes * 1.02
-        lows  = closes * 0.96
+        highs = closes.copy()
+        highs[:290]    = np.minimum(hist * 1.02, 104.0)   # cap below breakout threshold
+        highs[290:349] = 104.5                              # Prior252High = 104.5
+        highs[-1]      = close * 1.01
 
-        # Engineer today's low and the 5-day swing low
-        lows[-1]    = today_low
-        lows[-6:-1] = swing_low_val
+        lows = closes.copy()
+        lows[:290]    = hist * 0.97
+        lows[290:349] = 99.5                # wide range (H-L=5) → ATR ≈ 5
+        lows[344:349] = swing_low_val       # prior-5 lows → SwingLow5
+        lows[-1]      = today_low
 
         df = pd.DataFrame(
             {"Open": closes * 0.99, "High": highs, "Low": lows, "Close": closes, "Volume": 3e6},
@@ -191,39 +277,40 @@ class TestStructuralSL:
         return compute_indicators(df)
 
     def test_sl_is_min_of_today_and_swing(self):
-        """StructuralSL = MIN(95, 90) × 0.997 = 89.73, not MAX(95, 90) × 0.997 = 94.715."""
-        df = self._build_df_with_lows(today_low=95.0, swing_low_val=90.0)
+        """StructuralSL = MIN(103, 101) × 0.997 = 100.70, not MAX(103, 101) × 0.997 = 102.69."""
+        df = self._build_df_with_lows(today_low=103.0, swing_low_val=101.0)
         r = _call(df)
-        if r.action == "SIGNAL":
-            expected = min(95.0, 90.0) * SL_BUFFER
-            assert r.structural_sl is not None
-            assert abs(r.structural_sl - expected) < 0.10, (
-                f"StructuralSL should be ≈{expected:.2f} (MIN), got {r.structural_sl:.4f}"
-            )
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        expected = min(103.0, 101.0) * SL_BUFFER   # 101 × 0.997 = 100.70
+        assert r.structural_sl is not None
+        assert abs(r.structural_sl - expected) < 0.10, (
+            f"StructuralSL should be ≈{expected:.2f} (MIN), got {r.structural_sl:.4f}"
+        )
 
     def test_sl_when_today_low_is_lower(self):
-        """StructuralSL = MIN(85, 90) × 0.997 = 84.745 (today's low is lower)."""
-        df = self._build_df_with_lows(today_low=85.0, swing_low_val=90.0)
+        """StructuralSL = MIN(101, 103) × 0.997 = 100.70 (today's low 101 < swing 103)."""
+        df = self._build_df_with_lows(today_low=101.0, swing_low_val=103.0)
         r = _call(df)
-        if r.action == "SIGNAL":
-            expected = min(85.0, 90.0) * SL_BUFFER
-            assert r.structural_sl is not None
-            assert abs(r.structural_sl - expected) < 0.10
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        expected = min(101.0, 103.0) * SL_BUFFER   # 101 × 0.997 = 100.70
+        assert r.structural_sl is not None
+        assert abs(r.structural_sl - expected) < 0.10
 
     def test_sl_is_not_max(self):
         """
         Verify result is strictly less than what MAX() would give.
-        MAX(95, 90) = 95 × 0.997 = 94.715.
-        MIN(95, 90) = 90 × 0.997 = 89.73.
+        MIN(103, 101) = 101 × 0.997 = 100.70.
+        MAX(103, 101) = 103 × 0.997 = 102.69.
+        Difference must be > 0.50.
         """
-        df = self._build_df_with_lows(today_low=95.0, swing_low_val=90.0)
+        df = self._build_df_with_lows(today_low=103.0, swing_low_val=101.0)
         r = _call(df)
-        if r.action == "SIGNAL":
-            max_based = max(95.0, 90.0) * SL_BUFFER
-            assert r.structural_sl is not None
-            assert r.structural_sl < max_based - 0.50, (
-                f"structural_sl={r.structural_sl:.4f} should be < MAX-based {max_based:.4f}"
-            )
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        max_based = max(103.0, 101.0) * SL_BUFFER   # 102.69
+        assert r.structural_sl is not None
+        assert r.structural_sl < max_based - 0.50, (
+            f"structural_sl={r.structural_sl:.4f} should be < MAX-based {max_based:.4f}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -272,12 +359,12 @@ class TestPositionSizing:
             prior_signals_df=None, config=config, as_of_date=_EVAL_DATE,
             fetch_earnings=False,
         )
-        if r.action == "SIGNAL":
-            assert r.final_qty == min(r.qty_risk_based, r.qty_capital_based), (
-                "FinalQty must equal MIN(QtyRiskBased, QtyCapBased)"
-            )
-            assert r.final_qty <= r.qty_capital_based
-            assert r.final_qty <= r.qty_risk_based
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        assert r.final_qty == min(r.qty_risk_based, r.qty_capital_based), (
+            "FinalQty must equal MIN(QtyRiskBased, QtyCapBased)"
+        )
+        assert r.final_qty <= r.qty_capital_based
+        assert r.final_qty <= r.qty_risk_based
 
     def test_risk_constraint_binds(self):
         """
@@ -295,17 +382,18 @@ class TestPositionSizing:
             prior_signals_df=None, config=config, as_of_date=_EVAL_DATE,
             fetch_earnings=False,
         )
-        if r.action == "SIGNAL":
-            assert r.final_qty == min(r.qty_risk_based, r.qty_capital_based)
-            assert r.final_qty <= r.qty_risk_based
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        assert r.final_qty == min(r.qty_risk_based, r.qty_capital_based)
+        assert r.final_qty <= r.qty_risk_based
 
     def test_qty_t1_is_floor_half(self):
         """QtyT1 = floor(FinalQty/2); QtyTrailing = FinalQty - QtyT1."""
-        df = _make_breakout_df()
+        df = _make_signal_df()
         r = _call(df)
-        if r.action == "SIGNAL" and r.final_qty:
-            assert r.qty_t1 == math.floor(r.final_qty / 2)
-            assert r.qty_trailing == r.final_qty - r.qty_t1
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        assert r.final_qty
+        assert r.qty_t1 == math.floor(r.final_qty / 2)
+        assert r.qty_trailing == r.final_qty - r.qty_t1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -419,10 +507,10 @@ class TestTierAssignment:
 class TestEarnings:
     def test_not_verified_does_not_block_signal(self):
         """When fetch_earnings=False → 'not verified'; signal still generated if all gates pass."""
-        df = _make_breakout_df()
+        df = _make_signal_df()
         r = _call(df)   # fetch_earnings=False in _call
-        if r.action == "SIGNAL":
-            assert r.earnings_date in (None, "not verified")
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        assert r.earnings_date in (None, "not verified")
         # Earnings must never appear as a skip reason
         if r.skip_reason:
             assert "earnings" not in r.skip_reason.lower(), (
@@ -431,7 +519,7 @@ class TestEarnings:
 
     def test_earnings_warning_flag_from_mock(self):
         """Earnings within 7 days → earnings_warning=True; signal NOT blocked."""
-        df = _make_breakout_df()
+        df = _make_signal_df()
         with patch("signal_logic._get_earnings_info",
                    return_value=(str(_EVAL_DATE + timedelta(days=3)), True)):
             r = evaluate_ticker(
@@ -440,9 +528,8 @@ class TestEarnings:
                 prior_signals_df=None, config=_default_config(),
                 as_of_date=_EVAL_DATE, fetch_earnings=True,
             )
-        if r.action == "SIGNAL":
-            assert r.earnings_warning is True
-            assert r.action == "SIGNAL", "Earnings warning must not block the signal"
+        assert r.action == "SIGNAL", f"Expected SIGNAL, got {r.action}: {r.skip_reason}"
+        assert r.earnings_warning is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
