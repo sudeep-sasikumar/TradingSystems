@@ -649,6 +649,55 @@ Pattern (matches existing `52WeekHigh/`): add `_ROOT` and `_ROOT/52WeekHighUS` t
 
 ---
 
+### ✅ 52WHU-S2 — US S&P 500 Breakout System: Session 2 — Backtest Engine (complete, 2026-06-26)
+
+**Goal**: Build a three-version backtest engine that demonstrates how different execution
+assumptions change realised P&L, without contaminating the live scanner/bot code paths.
+
+**Files created:**
+- `52WeekHighUS/backtest/__init__.py` — package marker
+- `52WeekHighUS/backtest/engine.py` — full simulation engine (~950 lines)
+
+**Files modified:**
+- `52WeekHighUS/run_backtest.py` — `--checkpoint backtest` now fully implemented (was a stub)
+
+**Three backtest versions:**
+
+| Version | Stop base | SL% cap | Capital cap | Signal filter | Purpose |
+|---|---|---|---|---|---|
+| A | MAX(low, swing_low) × 0.997 | None | None | B4 only | Buggy baseline (intentional mistakes) |
+| B | MIN(low, swing_low) × 0.997 | 6% hard | max_capital / entry | B4 + B5 | Corrected stop + sizing |
+| C | Full spec via `evaluate_ticker` | 6% (B5) | full cap (B5) | All B1-B10 | Live-equivalent logic |
+
+**Key engine design decisions:**
+- `BACKTEST_START = date(2022, 1, 1)` — price data from 2020-01-01 for 252-day warmup
+- Entry windows: t+1/t+2/t+3 (3-day cancel), with gap-up/gap-down slippage fills
+- Time stop: 15 calendar days after entry
+- EMA-14 exit: 2 consecutive closes below EMA14
+- Trailing stop: `max_high_since_entry - ATR14_at_signal` (fixed delta, starts NEXT day after T1 fill)
+- T1 at `entry × 1.03`, T2 at `entry × 1.06`; T1 fills half, trailing half runs
+- Same-day SL/T1 conflict: SL first (conservative), UNLESS Open >= T1 (gap-up past target)
+- `TradeR = TradeRealizedPL / InitialRisk` — unit-normalised return
+- Look-ahead prevention: entry attempts processed BEFORE new signal detection each day
+- `pos_state[version][ticker]` dict tracks `days_held`, `consec_ema`, `max_high` ephemerally
+
+**Smoke test results (confirmed):**
+- V_A signal: SL=98.70 (MAX-based: max(99,97)×0.997), qty=294 (no capital cap)
+- V_B signal: SL=96.71 (MIN-based: min(99,97)×0.997), qty=97 (capital capped)
+- End-to-end mini run (1 ticker, 3 months): 3 versions run, 0 filled (signal on last date — correct)
+
+**Physical isolation confirmed:** `engine.py` imports nothing from `scanner/`, `bot/`, or `dashboard/`.
+Version A buggy assumptions (`_v_a_signal`, `_v_b_signal`) are only callable from `engine.py`.
+
+**To run:**
+```powershell
+venv\Scripts\python.exe 52WeekHighUS\run_backtest.py --checkpoint backtest
+# Set SP500_US_ACCOUNT_SIZE / SP500_US_RISK_PERCENT / SP500_US_MAX_CAPITAL_PER_TRADE in .env
+# First run downloads + caches all 503 tickers; expect ~5-10 min
+```
+
+---
+
 ## Open Questions / Pending Decisions
 
 None — all design questions confirmed as of 2026-06-19.
