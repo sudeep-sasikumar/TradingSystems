@@ -1,0 +1,17 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install dependencies first so this layer is cached across code-only changes
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# APScheduler inside scanner.py handles the 23:15 UTC Mon-Fri schedule.
+# That is 19:15 ET — after the close AND after EDGAR's 17:30 ET same-day filing
+# cutoff, so the day's Form 4 cohort is complete when the scan runs.
+CMD ["python", "InsiderSwing/scanner.py"]

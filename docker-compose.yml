@@ -28,6 +28,13 @@ services:
       - BOT_TOKEN=${BOT_TOKEN}
       - CHAT_ID=${CHAT_ID}
       - MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS:-20}
+      # The bot also runs the InsiderSwing Telegram jobs (one long-polling
+      # consumer per token), so it needs the insider sizing parameters to build
+      # the entry plan shown in each alert.
+      - INSIDER_ACCOUNT_SIZE=${INSIDER_ACCOUNT_SIZE:-100000}
+      - INSIDER_RISK_PERCENT=${INSIDER_RISK_PERCENT:-1}
+      - INSIDER_MAX_CONCURRENT_POSITIONS=${INSIDER_MAX_CONCURRENT_POSITIONS:-10}
+      - INSIDER_CONVICTION_THRESHOLD=${INSIDER_CONVICTION_THRESHOLD:-60}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - trading_data:/app/data
@@ -57,6 +64,34 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  insider_scanner:
+    image: ghcr.io/sudeep-sasikumar/tradingsystems-insiderscanner:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.insider_scanner
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      # SEC requires a descriptive User-Agent with a contact address on every
+      # request. Requests without one are throttled or blocked outright.
+      - INSIDER_SEC_USER_AGENT=${INSIDER_SEC_USER_AGENT}
+      - INSIDER_SEC_RATE_LIMIT=${INSIDER_SEC_RATE_LIMIT:-8}
+      - INSIDER_SOURCE=${INSIDER_SOURCE:-edgar}
+      - FMP_API_KEY=${FMP_API_KEY:-}
+      - INSIDER_ACCOUNT_SIZE=${INSIDER_ACCOUNT_SIZE:-100000}
+      - INSIDER_RISK_PERCENT=${INSIDER_RISK_PERCENT:-1}
+      - INSIDER_MAX_CONCURRENT_POSITIONS=${INSIDER_MAX_CONCURRENT_POSITIONS:-10}
+      - INSIDER_CONVICTION_THRESHOLD=${INSIDER_CONVICTION_THRESHOLD:-60}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - trading_data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   dashboard:
     image: ghcr.io/sudeep-sasikumar/tradingsystems-dashboard:latest
     build:
@@ -64,6 +99,18 @@ services:
       dockerfile: docker/Dockerfile.dashboard
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Setup & Admin Step 8 shells out to InsiderSwing/run_insider.py from THIS
+      # container, so it needs the same insider settings as insider_scanner —
+      # in particular the SEC User-Agent, without which EDGAR blocks every request.
+      - INSIDER_SEC_USER_AGENT=${INSIDER_SEC_USER_AGENT}
+      - INSIDER_SEC_RATE_LIMIT=${INSIDER_SEC_RATE_LIMIT:-8}
+      - INSIDER_SOURCE=${INSIDER_SOURCE:-edgar}
+      - FMP_API_KEY=${FMP_API_KEY:-}
+      - INSIDER_ACCOUNT_SIZE=${INSIDER_ACCOUNT_SIZE:-100000}
+      - INSIDER_RISK_PERCENT=${INSIDER_RISK_PERCENT:-1}
+      - INSIDER_MAX_CONCURRENT_POSITIONS=${INSIDER_MAX_CONCURRENT_POSITIONS:-10}
+      - INSIDER_CONVICTION_THRESHOLD=${INSIDER_CONVICTION_THRESHOLD:-60}
+      - INSIDER_BACKTEST_START=${INSIDER_BACKTEST_START:-2016-01-01}
     volumes:
       - trading_data:/app/data
     ports:

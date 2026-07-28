@@ -18,7 +18,10 @@ build/
 # Exclude runtime-generated data — do NOT exclude data/reconstitution_pdfs/
 # (those PDFs are committed reference data and must be bundled in the dashboard image)
 data/trading.db
+data/sp500_us_breakout.db
+data/insider_swing.db*
 data/cache/
+data/reports/
 
 # Dev-only scripts not needed in production images
 diag_corp_actions.py

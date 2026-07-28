@@ -32,4 +32,9 @@ pdfplumber>=0.11.0
 
 # ─── US S&P 500 Breakout System (52WeekHighUS) ────────────────────────────────
 lxml>=4.9.0         # pandas read_html for Wikipedia S&P 500 universe list
-pytest>=7.0.0       # unit tests (52WeekHighUS/tests/)
+pytest>=7.0.0       # unit tests (52WeekHighUS/tests/, InsiderSwing/tests/)
+
+# ─── Insider-Trade Cluster Swing System (InsiderSwing) ────────────────────────
+# SEC EDGAR ingestion uses requests + the stdlib XML parser (already pinned above).
+markdown>=3.5       # optional: HTML rendering of saved backtest reports
+                    # (report.py falls back to a <pre> block if it is missing)

@@ -25,6 +25,59 @@ See `PROJECT_STATUS.md` for checkpoint-by-checkpoint build state.
 
 ---
 
+## InsiderSwing — Insider-Trade Cluster Swing System
+
+**Folder**: `InsiderSwing/` · **DB**: `data/insider_swing.db` (separate from `trading.db`)
+**strategy_version**: `insider_v1` · **Dashboard tab**: "Insider Swing" (3rd of 4)
+**Docker service**: `insider_scanner` (23:15 UTC Mon–Fri)
+
+### What it is
+Trades on **SEC Form 4 filings** — legally required *public* insider-transaction
+disclosures, filed within 2 business days. This is the documented insider-purchase
+anomaly (Seyhun; Lakonishok & Lee), **not** trading on material non-public
+information. Keep that framing in code comments — the module name looks alarming
+out of context.
+
+### Non-negotiable rules for this module
+1. **`filing_date` is the ONLY date any signal logic may key on.** `transaction_date`
+   is stored for analysis only. Using it for timing is the classic lookahead bug and
+   the schema/scoring/engine are all built to prevent it. Do not "optimise" this away.
+2. **Noise filter runs before any signal logic.** Only `P-Purchase` and `S-Sale`,
+   non-derivative, cash price > 0, not a confirmed 10b5-1 plan. Excluded rows are
+   KEPT in the DB (never deleted) so the breakdown stays auditable.
+3. **No mirrored short signal off insider selling.** Cluster selling is a caution
+   filter only. The literature does not support selling as a symmetric predictor.
+4. **Three arms are always reported together** — `insider_only`, `tech_only`,
+   `combined`. Reporting only `combined` makes it impossible to tell whether the
+   insider data or the timing rule is doing the work.
+5. **Expired signals are logged, not dropped.** The expired set is what quantifies
+   the cost of requiring technical confirmation.
+6. **Report flat/negative results plainly.** Do not tune parameters until the
+   backtest looks good — that conclusion is exactly as useful as a positive one.
+7. **SEC requires `INSIDER_SEC_USER_AGENT`** with a real contact address, and a
+   ≤10 req/s rate limit. Anonymous requests get blocked.
+
+### Build order (each step needs the previous one)
+```powershell
+python InsiderSwing\run_insider.py --checkpoint universe
+python InsiderSwing\run_insider.py --checkpoint ingest --start 2014-01-01
+python InsiderSwing\run_insider.py --checkpoint score
+python InsiderSwing\run_insider.py --checkpoint backtest
+python InsiderSwing\run_insider.py --checkpoint sweep
+python -m pytest InsiderSwing\tests\ -q
+```
+Ingest from **~2 years before** the backtest start — the relative-size score compares
+each buy against that insider's own trailing 2-year average.
+
+### Import pattern gotcha
+`InsiderSwing/` uses flat absolute imports (repo convention). `52WeekHighUS/` also has
+`universe.py`, `models.py` and `db.py`, so putting it on `sys.path` **shadows this
+package**. `prices.py` therefore loads `52WeekHighUS/data_loader.compute_indicators`
+via `importlib` by file path and restores `sys.path` afterwards. Do not replace that
+with a plain import.
+
+---
+
 ## Confirmed Design Decisions — Do NOT change without asking the user
 
 ### 1. Entry Signal: Dual-benchmark approach
@@ -107,6 +160,22 @@ E:\Trading Systems\
 │       ├── __init__.py
 │       └── bot.py                # persistent Telegram bot (Checkpoint 5)
 │
+├── InsiderSwing\                 # Insider-Trade Cluster Swing System
+│   ├── run_insider.py            # CLI entry point (universe|ingest|score|backtest|sweep|scan)
+│   ├── config.py                 # all tunables, INSIDER_* env overrides
+│   ├── models.py / db.py         # own SQLite: data/insider_swing.db
+│   ├── sources\                  # base.py, edgar_source.py, fmp_source.py, ingest.py
+│   ├── universe.py               # point-in-time universe + CIK map + liquidity screen
+│   ├── filters.py                # Form 4 noise classification
+│   ├── scoring.py                # 0-100 conviction score, fully auditable
+│   ├── earnings.py               # earnings-proximity confound flag
+│   ├── prices.py / technical.py / risk.py
+│   ├── backtest\                 # engine.py (3 arms), walkforward.py, metrics.py
+│   ├── report.py                 # saved markdown/HTML/JSON report per run
+│   ├── scanner.py                # daily scan (Docker: insider_scanner)
+│   ├── telegram_jobs.py          # alert formatting + jobs, hosted by the bot process
+│   └── tests\test_insider.py     # 65 unit tests
+│
 ├── dashboard\                    # shared across ALL phases
 │   ├── app.py                    # st.tabs() shell — add new tabs here for new phases
 │   └── tabs\
@@ -146,7 +215,13 @@ E:\Trading Systems\
 |---|---|---|
 | `scanner` | Long-running with internal APScheduler | Wakes hourly during market hours (9:15–15:30 IST = 03:45–10:00 UTC), checks signals + stop-losses |
 | `bot` | **Always running, `restart: always`** | Must stay alive to receive Telegram button-press callbacks. If it exits, callbacks are lost. |
+| `insider_scanner` | Long-running with APScheduler | Fires 23:15 UTC Mon–Fri (19:15 ET) — after the close AND after EDGAR's 17:30 ET same-day filing cutoff, so the day's Form 4 cohort is complete |
 | `dashboard` | Always running | Streamlit web server on port 8502 |
+
+**Telegram note**: `insider_scanner` writes signals to the DB only. All Telegram I/O
+for InsiderSwing runs inside the existing `bot` service via
+`InsiderSwing/telegram_jobs.py` — long-polling tolerates only one consumer per token.
+The import in `bot.py` is guarded so a failure there can never break Nifty/S&P 500 alerts.
 
 ---
 

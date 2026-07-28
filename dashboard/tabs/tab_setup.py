@@ -1,10 +1,14 @@
 """
 Setup & Admin tab — populate all backtest and analysis data for a fresh deployment.
 
-Run Steps 1-3 in order on a fresh VPS. Each step is safe to re-run.
+Run Steps 1-7 in order on a fresh VPS. Each step is safe to re-run.
 Long-running steps (historic backtest: 20-45 min) block this browser session;
 keep the tab open until complete. For unattended first-time setup, SSH into the
 VPS and run the CLI commands shown in the Advanced section below.
+
+Step 8 (Insider Swing) is deliberately separate from "Run Everything": its EDGAR
+backfill alone takes longer than every other step combined, and bundling it would
+turn a 2-hour setup into an overnight one with no way to tell what is still running.
 """
 import subprocess
 import sys
@@ -25,6 +29,58 @@ _RUN_HISTORIC   = str(_ROOT / "52WeekHigh" / "run_historic_backtest.py")
 _RUN_REGIME     = str(_ROOT / "52WeekHigh" / "run_regime_analysis.py")
 _RUN_SP500      = str(_ROOT / "SP500" / "run_sp500_backtest.py")
 _RUN_SP500_SCAN = str(_ROOT / "SP500" / "scanner" / "scanner.py")
+_RUN_INSIDER    = str(_ROOT / "InsiderSwing" / "run_insider.py")
+
+
+def _insider_counts() -> dict:
+    """
+    Row counts from the InsiderSwing DB (a SEPARATE SQLite file from trading.db).
+
+    Imported lazily and by explicit file path: InsiderSwing/ uses flat absolute
+    imports and contains db.py / models.py / universe.py, which would shadow the
+    dashboard's own modules if the package directory went on sys.path here.
+    Returns zeros rather than raising when the module has not been built yet.
+    """
+    empty = {"filings": 0, "transactions": 0, "buys": 0, "scores": 0,
+             "signals": 0, "trades": 0, "runs": 0, "last_filing": None, "available": False}
+    try:
+        import importlib.util
+
+        saved = list(sys.path)
+        try:
+            for p in (str(_ROOT / "InsiderSwing"), str(_ROOT / "InsiderSwing" / "sources")):
+                if p not in sys.path:
+                    sys.path.append(p)
+            spec = importlib.util.spec_from_file_location(
+                "insiderswing_db_status", _ROOT / "InsiderSwing" / "db.py"
+            )
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["insiderswing_db_status"] = mod
+            spec.loader.exec_module(mod)
+        finally:
+            sys.path[:] = saved
+
+        def _one(sql: str):
+            try:
+                df = mod.read_sql(sql)
+                return df.iloc[0, 0] if not df.empty else 0
+            except Exception:
+                return 0
+
+        return {
+            "filings": int(_one("SELECT COUNT(*) FROM ins_filings") or 0),
+            "transactions": int(_one("SELECT COUNT(*) FROM ins_transactions") or 0),
+            "buys": int(_one("SELECT COUNT(*) FROM ins_transactions "
+                             "WHERE classification='open_market_buy'") or 0),
+            "scores": int(_one("SELECT COUNT(*) FROM ins_scores") or 0),
+            "signals": int(_one("SELECT COUNT(*) FROM ins_signals") or 0),
+            "trades": int(_one("SELECT COUNT(*) FROM ins_trades") or 0),
+            "runs": int(_one("SELECT COUNT(*) FROM ins_backtest_runs") or 0),
+            "last_filing": _one("SELECT MAX(filing_date) FROM ins_filings") or None,
+            "available": True,
+        }
+    except Exception:
+        return empty
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
@@ -229,6 +285,11 @@ def render_tab() -> None:
 
     st.divider()
 
+    # ── Step 8 — Insider Swing ─────────────────────────────────────────────────
+    _insider_section()
+
+    st.divider()
+
     # ── Run All ────────────────────────────────────────────────────────────────
     st.subheader("Run Everything (Steps 1 → 7)")
     st.warning(
@@ -318,6 +379,170 @@ def render_tab() -> None:
     _advanced_section()
 
 
+# ── Step 8 — Insider Swing pipeline ────────────────────────────────────────────
+
+def _insider_section() -> None:
+    """
+    One button that runs the entire insider-cluster pipeline end to end.
+
+    Deliberately NOT folded into "Run Everything": the EDGAR backfill alone is
+    longer than every other step in this tab combined, and bundling it would
+    turn a 2-hour setup into an overnight one with no way to tell which part is
+    still running.
+    """
+    st.subheader("Step 8 — Insider-Trade Cluster Swing (full pipeline)")
+    st.markdown(
+        "Runs the whole insider system in order: **universe → ingest → score → backtest** "
+        "(optionally the parameter-stability sweep too). Populates the **Insider Swing** tab.  \n"
+        "**strategy\\_version:** `insider_v1` &nbsp;|&nbsp; "
+        "**DB:** `data/insider_swing.db` (separate from `trading.db`)"
+    )
+
+    ins = _insider_counts()
+
+    # Two hard prerequisites, checked up front rather than failing 40 minutes in.
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            n_members = int(conn.execute(text("SELECT COUNT(*) FROM sp500_membership")).scalar() or 0)
+    except Exception:
+        n_members = 0
+
+    import os
+    ua = os.getenv("INSIDER_SEC_USER_AGENT", "")
+    ua_ok = bool(ua) and "@" in ua and "example.com" not in ua
+
+    if n_members < 400:
+        st.error(
+            "**Blocked — run Step 4 first.** The insider universe is built from the "
+            "point-in-time `sp500_membership` table (so delisted names are included and the "
+            "backtest isn't survivorship-biased). That table is empty or incomplete."
+        )
+    if not ua_ok:
+        st.error(
+            "**Blocked — set `INSIDER_SEC_USER_AGENT` in `.env`.** The SEC requires a "
+            "descriptive User-Agent containing a real contact address on every request "
+            "(e.g. `Sudeep Sasikumar TradingSystems (you@example.org)`). Anonymous or "
+            "placeholder requests are throttled and then blocked outright.  \n"
+            "After editing `.env`: `docker compose up -d` to pick it up."
+        )
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    start_date = c1.text_input("Ingest / backtest start", value="2016-01-01",
+                               key="ins_start",
+                               help="Ingest reaches back 2 extra years automatically — the "
+                                    "relative-size score compares each buy to that insider's "
+                                    "own trailing 2-year average.")
+    quick = c2.checkbox("Quick test (12 tickers)", value=False, key="ins_quick",
+                        help="Runs the whole pipeline on a small ticker set in ~10 min so you "
+                             "can verify the plumbing before committing to the full backfill.")
+    run_sweep = c3.checkbox("Also run the parameter-stability sweep", value=False,
+                            key="ins_sweep",
+                            help="80 full simulations. Adds 10-40 min on the full universe. "
+                                 "Answers whether performance is a plateau or an overfit spike.")
+
+    if quick:
+        st.info(
+            "**Quick test mode** — 12 liquid large caps, not a real result. Use it to confirm "
+            "EDGAR access, the SEC User-Agent, and the report pipeline all work. Any backtest "
+            "number it produces will be flagged as a thin sample, correctly."
+        )
+    else:
+        st.warning(
+            "**Full run: 3–8 hours**, dominated by the first EDGAR backfill "
+            "(~600 issuers × 10 years of Form 4 documents at the SEC's 8 req/s ceiling). "
+            "Every document is cached to disk gzipped and the DB constraints make re-runs "
+            "idempotent, so this is **resumable** — if it dies, click again and it picks up "
+            "where it left off.  \n"
+            "For an unattended first run, prefer SSH + the CLI command in the Advanced "
+            "section: a browser tab held open for 6 hours is the fragile part, not the job."
+        )
+
+    tickers_arg = ["--tickers", "INTC,F,KMI,OXY,T,PARA,WBA,MRNA,DVN,APA,HAL,NEM"] if quick else []
+    ingest_start = _shift_year(start_date, -2)
+
+    disabled = (n_members < 400) or (not ua_ok)
+    if st.button("▶  Run Full Insider Pipeline", key="btn_insider", type="primary",
+                 disabled=disabled):
+        st.markdown("**8a — Universe & CIK resolution**")
+        ok = _run_step(
+            label="Insider universe + SEC CIK map",
+            cmd=[_PY, _RUN_INSIDER, "--checkpoint", "universe", "--start", start_date],
+            timeout=900,
+        )
+
+        if ok:
+            st.markdown(f"**8b — Ingest Form 4 filings from {ingest_start}** "
+                        "(the long one — resumable, disk-cached)")
+            ok = _run_step(
+                label=f"EDGAR Form 4 ingest ({ingest_start} → today)",
+                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "ingest",
+                     "--start", ingest_start] + tickers_arg,
+                timeout=28800,      # 8h — the backfill is genuinely this long
+            )
+
+        if ok:
+            st.markdown("**8c — Conviction scoring**")
+            ok = _run_step(
+                label="Conviction scores (0-100, with audit breakdown)",
+                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "score",
+                     "--start", start_date] + tickers_arg,
+                timeout=3600,
+            )
+
+        if ok:
+            st.markdown("**8d — Three-arm backtest + saved report**")
+            ok = _run_step(
+                label="Backtest (insider_only / tech_only / combined)",
+                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "backtest",
+                     "--start", start_date, "--label", "vps_baseline"] + tickers_arg,
+                timeout=14400,
+            )
+
+        if ok and run_sweep:
+            st.markdown("**8e — Parameter stability sweep**")
+            _run_step(
+                label="Parameter sweep (80 cells)",
+                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "sweep",
+                     "--start", start_date, "--label", "vps"] + tickers_arg,
+                timeout=14400,
+            )
+
+        if ok:
+            st.success(
+                "Insider pipeline complete — open the **Insider Swing** tab. The verdict is "
+                "printed at the top of the Backtest sub-tab and in the saved report under "
+                "`data/reports/insider/`. A flat or negative result there is a real finding, "
+                "not a failed run."
+            )
+        else:
+            st.error("Pipeline stopped at the failed step above — later steps were skipped "
+                     "because each one depends on the previous one's output.")
+
+    # Current state
+    if ins["available"] and ins["filings"]:
+        st.markdown("**Current insider data**")
+        i1, i2, i3, i4, i5 = st.columns(5)
+        i1.metric("Form 4 filings", f"{ins['filings']:,}")
+        i2.metric("Open-market buys", f"{ins['buys']:,}",
+                  help=f"of {ins['transactions']:,} transaction lines — the rest are awards, "
+                       "vesting, exercises and gifts, which carry no conviction information")
+        i3.metric("Scores", f"{ins['scores']:,}")
+        i4.metric("Signals", f"{ins['signals']:,}")
+        i5.metric("Backtest runs", f"{ins['runs']:,}")
+        if ins["last_filing"]:
+            st.caption(f"Newest stored filing date: **{ins['last_filing']}**")
+
+
+def _shift_year(date_str: str, delta: int) -> str:
+    """Shift a YYYY-MM-DD string by whole years; returns the input on bad format."""
+    try:
+        y, m, d = (int(x) for x in str(date_str).strip().split("-"))
+        return f"{y + delta:04d}-{m:02d}-{d:02d}"
+    except Exception:
+        return date_str
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _db_status() -> None:
@@ -387,6 +612,16 @@ def _db_status() -> None:
     d5.metric("SP500 Live Trades",   f"{n_sp500_live:,}",     help="Open + closed live trades")
     d6.metric("SP500 Pending Sigs",  f"{n_sp500_pend:,}",     help="Pending S&P 500 signals (awaiting Accept/Reject)")
 
+    ins = _insider_counts()
+    st.markdown("**Insider Swing (US Form 4)**")
+    e1, e2, e3, e4, e5, e6 = st.columns(6)
+    e1.metric("Form 4 Filings",   f"{ins['filings']:,}",      help="ins_filings — raw EDGAR corpus")
+    e2.metric("Open-Market Buys", f"{ins['buys']:,}",         help="Survivors of the noise filter; the rest are awards/vesting/exercises/gifts")
+    e3.metric("Conviction Scores", f"{ins['scores']:,}",      help="ins_scores — one per (ticker, filing date)")
+    e4.metric("Insider Signals",  f"{ins['signals']:,}",      help="Includes expired and blocked signals, kept deliberately")
+    e5.metric("Insider Trades",   f"{ins['trades']:,}",       help="ins_trades across all three backtest arms")
+    e6.metric("Backtest Runs",    f"{ins['runs']:,}",         help="ins_backtest_runs")
+
     st.markdown("**Nifty Freshness**")
     nf1, nf2 = st.columns(2)
     nf1.metric("Nifty Fresh (Original)",  f"{n_fresh_orig:,}",
@@ -416,6 +651,18 @@ def _db_status() -> None:
     else:
         missing = [k for k, ok in all_checks.items() if not ok]
         st.warning(f"Missing: {', '.join(missing)}.")
+
+    # Insider Swing is reported separately, not folded into the check above: its
+    # backfill takes hours and is optional, so a missing insider corpus should not
+    # make an otherwise-complete Nifty/S&P 500 deployment look broken.
+    if ins["runs"] > 0:
+        st.success("Insider Swing populated — see the **Insider Swing** tab.")
+    elif ins["filings"] > 0:
+        st.info("**Insider Swing:** Form 4 data is ingested but no backtest has run yet. "
+                "Use **Step 8** below.")
+    else:
+        st.info("**Insider Swing:** not populated. Use **Step 8** below "
+                "(needs Step 4 first, plus `INSIDER_SEC_USER_AGENT` in `.env`).")
 
     # Contextual next-step guidance
     if n_sp500_trades > 500 and n_sp500_regime == 0:
@@ -513,6 +760,38 @@ docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint fr
 
 # Optional: S&P 500 scanner test run (after US market close)
 docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
+
+# Step 8: Insider Swing full pipeline (3-8 h, dominated by the EDGAR backfill)
+# PREFER THIS OVER THE BUTTON for the first full run — a browser tab held open
+# for six hours is the fragile part, not the job. Every fetched document is
+# cached to disk and the DB constraints make re-runs idempotent, so it resumes.
+docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint universe
+docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint ingest --start 2014-01-01
+docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint score --start 2016-01-01
+docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint backtest --start 2016-01-01 --label vps_baseline
+docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint sweep --start 2016-01-01
+
+# Survive an SSH disconnect during the multi-hour backfill:
+docker compose exec -d dashboard python InsiderSwing/run_insider.py --checkpoint ingest --start 2014-01-01
+docker compose logs -f dashboard
+```
+
+**Insider Swing prerequisites (both are enforced by the Step 8 button):**
+```bash
+# 1. sp500_membership must be populated (Step 4) — it is the point-in-time,
+#    survivorship-corrected universe the insider system builds on.
+# 2. .env must set a real SEC contact address; the SEC blocks anonymous requests:
+#      INSIDER_SEC_USER_AGENT=Your Name TradingSystems (you@yourdomain.com)
+docker compose up -d          # reload .env after editing
+
+# Insider scanner service (fires 23:15 UTC Mon-Fri = 19:15 ET, after EDGAR's
+# 17:30 ET same-day filing cutoff, so the day's Form 4 cohort is complete):
+docker compose ps insider_scanner
+docker compose logs -f insider_scanner
+docker compose exec insider_scanner python InsiderSwing/scanner.py --run-now
+
+# Re-run the noise filter over the stored corpus without re-fetching from EDGAR:
+docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint reclassify
 ```
 
 **S&P 500 scanner continuous service (runs in `sp500_scanner` Docker container):**
@@ -543,6 +822,7 @@ docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint re
 ```bash
 git pull
 docker compose up --build -d
-docker compose ps   # verify all three services are running
+docker compose ps   # verify all five services are running
+                    # scanner · bot · sp500_scanner · insider_scanner · dashboard
 ```
 """)

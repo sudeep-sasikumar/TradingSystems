@@ -65,6 +65,24 @@ load_dotenv(_ROOT / ".env")
 from shared.db import get_engine, session_scope
 from shared.models import Signal, Trade
 
+# ── InsiderSwing integration ──────────────────────────────────────────────────
+# The insider-cluster system lives in its own package with its own SQLite DB.
+# It shares THIS process because Telegram long-polling tolerates only one
+# consumer per bot token. Import is guarded: if the module or its dependencies
+# are unavailable, the Nifty and S&P 500 alerting must keep working untouched.
+for _ins_path in (str(_ROOT / "InsiderSwing"),
+                  str(_ROOT / "InsiderSwing" / "sources")):
+    if _ins_path not in sys.path:
+        sys.path.append(_ins_path)     # append, never insert — must not shadow shared/
+try:
+    import telegram_jobs as insider_jobs
+except Exception as _ins_exc:          # noqa: BLE001
+    insider_jobs = None
+    logging.getLogger("bot").warning(
+        "InsiderSwing Telegram integration unavailable (%s) — "
+        "Nifty and S&P 500 alerting is unaffected.", _ins_exc,
+    )
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -639,6 +657,14 @@ async def _job_eod_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Accept / Reject button handler."""
     query = update.callback_query
+
+    # InsiderSwing owns the ins_accept: / ins_reject: prefixes and answers the
+    # query itself. Dispatch before the generic parse below, which would read
+    # "ins_accept" as an unknown action.
+    if insider_jobs is not None and insider_jobs.handles(query.data or ""):
+        await insider_jobs.handle_callback(update, context)
+        return
+
     await query.answer()   # must answer within 60s or Telegram shows "loading"
 
     try:
@@ -788,6 +814,13 @@ async def _post_init(app: Application) -> None:
         days=(0, 1, 2, 3, 4),
         name="eod_summary",
     )
+
+    if insider_jobs is not None:
+        try:
+            insider_jobs.register_jobs(jq)
+        except Exception as exc:      # noqa: BLE001
+            logger.error("Could not register InsiderSwing jobs (%s) — "
+                         "Nifty and S&P 500 jobs are unaffected.", exc)
 
     logger.info("Jobs scheduled. Polling for Telegram updates...")
 

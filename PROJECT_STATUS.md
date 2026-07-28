@@ -6,11 +6,11 @@
 
 ## Current State
 
-- **Date last updated**: 2026-06-26
-- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete) + Freshness (Nifty + SP500 complete) + **52WeekHighUS US Breakout System (Session 1 complete)**
-- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1–S7 + Freshness + **52WHU-S1**
-- **Next (52WeekHighUS)**: Session 2 — backtest engine (3-version comparison, Part I of spec)
-- **Next action (VPS)**: git pull → docker compose up --build -d → click "Run Everything (Steps 1–9)" in Setup & Admin tab
+- **Date last updated**: 2026-07-28
+- **Active phase**: Phase 1 (Nifty complete) + S&P 500 system (CP-S7 complete) + Freshness (Nifty + SP500 complete) + 52WeekHighUS (Sessions 1–2 complete) + **InsiderSwing (module complete, awaiting full data backfill)**
+- **Completed checkpoints**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 8b, 8c + CP-S1–S7 + Freshness + 52WHU-S1, 52WHU-S2 + **INS-1**
+- **Next (InsiderSwing)**: run the full-universe EDGAR backfill (multi-hour), then the real backtest + sweep
+- **Next action (VPS)**: git pull → docker compose up --build -d (now 5 services) → set `INSIDER_SEC_USER_AGENT` in `.env` first
 
 ---
 
@@ -694,6 +694,83 @@ Version A buggy assumptions (`_v_a_signal`, `_v_b_signal`) are only callable fro
 venv\Scripts\python.exe 52WeekHighUS\run_backtest.py --checkpoint backtest
 # Set SP500_US_ACCOUNT_SIZE / SP500_US_RISK_PERCENT / SP500_US_MAX_CAPITAL_PER_TRADE in .env
 # First run downloads + caches all 503 tickers; expect ~5-10 min
+```
+
+---
+
+### ✅ INS-1 — Insider-Trade Cluster Swing System (module complete, 2026-07-28)
+
+**New folder**: `InsiderSwing/` — sibling to `52WeekHigh/`, `SP500/`, `52WeekHighUS/`.
+**DB**: `data/insider_swing.db` (separate from `trading.db`) · **strategy_version**: `insider_v1`
+**Dashboard tab**: "Insider Swing" (dashboard is now 4 tabs) · **Docker service**: `insider_scanner`
+
+**What it trades**: SEC Form 4 filings — legally required *public* insider-transaction
+disclosures. The documented insider-purchase anomaly (Seyhun; Lakonishok & Lee), NOT
+material non-public information. This framing is in the code comments deliberately.
+
+**Files created:**
+- `InsiderSwing/__init__.py`, `config.py` (all tunables, `INSIDER_*` env), `models.py`
+  (8 tables), `db.py` (WAL-mode SQLite)
+- `InsiderSwing/sources/` — `base.py` (interface + records), `edgar_source.py`
+  (SEC EDGAR: submissions-JSON + daily-index discovery, Form 4 XML parse, rate limiter,
+  gzipped disk cache), `fmp_source.py`, `ingest.py` (orchestrator + `make_source`)
+- `InsiderSwing/universe.py` — point-in-time universe from `sp500_membership`, CIK
+  resolution, liquidity screen, market-cap buckets
+- `InsiderSwing/filters.py` — Form 4 noise classification
+- `InsiderSwing/scoring.py` — 0–100 conviction score with full audit breakdown
+- `InsiderSwing/earnings.py` — earnings-proximity confound flag
+- `InsiderSwing/prices.py`, `technical.py`, `risk.py`
+- `InsiderSwing/backtest/` — `engine.py` (3 arms), `walkforward.py`, `metrics.py`
+- `InsiderSwing/report.py`, `scanner.py`, `telegram_jobs.py`, `run_insider.py`
+- `InsiderSwing/tests/test_insider.py` — **65 unit tests, all pass**
+- `dashboard/tabs/tab_insider.py`, `docker/Dockerfile.insider_scanner`
+
+**Files modified:**
+- `dashboard/app.py` — 4-tab layout
+- `52WeekHigh/bot/bot.py` — guarded InsiderSwing job registration + `ins_accept:`/`ins_reject:`
+  callback dispatch. Import failure logs a warning and leaves Nifty/SP500 alerting untouched.
+- `docker-compose.yml` (5 services), `.env.example`, `requirements.txt`, `README.md`, `CLAUDE.md`
+
+**Design decisions locked in:**
+
+| Decision | Choice | Why |
+|---|---|---|
+| Signal date key | `filing_date` ONLY | `transaction_date` is unknowable at the time — the classic lookahead bug |
+| Availability lag | filing + 1 session, fill at next open | filings accepted after 17:30 ET aren't tradeable that day |
+| Primary source | SEC EDGAR (not FMP) | free, complete, and the only one carrying the Rule 10b5-1 checkbox; FMP's per-symbol history is plan-gated (confirmed 403) |
+| Noise filter | keep only `P`/`S`, non-derivative, price > 0, not a confirmed 10b5-1 plan | ~95% of the raw feed is awards/vesting/exercises/gifts |
+| Excluded rows | KEPT in DB | breakdown must stay auditable |
+| Score weights | cluster 40 / role 20 / size 20 / novelty 20 | cluster buying is the most replicated finding; weights are literature-derived, not fitted |
+| Size baseline | insider's OWN trailing 2y average | a $1m buy means nothing if they always buy $1m |
+| 10%-owner role weight | 0.10 | usually fund rebalancing, not conviction |
+| Insider selling | caution filter only, no mirrored short | literature doesn't support symmetry |
+| Earnings proximity | ×0.85 score penalty + visible flag | down-weight, never exclude |
+| Backtest arms | `insider_only`, `tech_only`, `combined` — all three always | otherwise you can't tell which half works |
+| Expired signals | logged, never dropped | quantifies the cost of the timing overlay |
+| Intrabar convention | stop fills before target | daily bars can't resolve ordering; assuming the good one invents returns |
+| Stop floor | max(0.5×ATR, 1% of price) | found in smoke testing: a swing low a cent under entry exploded R-multiples |
+| Slippage | `base_spread + coef×√participation` | flat bps hides exactly the small-cap fill problem |
+| tech_only same-day ranking | stable hash of (ticker, date) | ADV or alphabetical ranking would bias the control sample |
+
+**Smoke test (12 tickers, 2022-01→2026-06, EDGAR):**
+4,450 filings → 10,841 transaction lines → **368 open-market (3.4%)**, 0 fetch failures.
+That 3.4% is the whole case for the noise filter.
+86 score events → 22 above threshold. Three arms ran end-to-end; report generated.
+Result was correctly reported as **thin-sample, no distinguishable edge** — the
+verdict logic works on a negative result, which is what it was built for.
+
+**Not yet done**: the full-universe multi-year EDGAR backfill (hours, resumable,
+disk-cached). Until that runs, no conclusion about the strategy is available.
+
+**To run:**
+```powershell
+# .env must set INSIDER_SEC_USER_AGENT (SEC blocks anonymous requests)
+python InsiderSwing\run_insider.py --checkpoint universe
+python InsiderSwing\run_insider.py --checkpoint ingest --start 2014-01-01   # hours
+python InsiderSwing\run_insider.py --checkpoint score
+python InsiderSwing\run_insider.py --checkpoint backtest --label baseline
+python InsiderSwing\run_insider.py --checkpoint sweep
+python InsiderSwing\scanner.py --run-now
 ```
 
 ---
