@@ -376,6 +376,48 @@ class InsiderBacktestRun(Base):
     strategy_version = Column(String(20), nullable=False, default=STRATEGY_VERSION)
 
 
+class InsiderPipelineRun(Base):
+    """
+    Progress tracker for the one-click background pipeline (Setup & Admin Step 8).
+
+    The pipeline is launched DETACHED from the dashboard process, so it survives
+    the browser tab closing, the Streamlit session expiring, and the user's
+    laptop sleeping — it only needs the VPS to stay on. That means the only way
+    to know how it is going is this table: the runner writes its progress here,
+    and the dashboard reads it whenever the user comes back, minutes or a day
+    later.
+
+    ``heartbeat_at`` is touched every 30s by a daemon thread in the runner. A
+    row still marked 'running' with a stale heartbeat means the process died
+    (OOM, container restart) rather than that it is still working — without the
+    heartbeat those two states are indistinguishable during a multi-hour step.
+    """
+    __tablename__ = "ins_pipeline_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    status = Column(String(15), nullable=False, default="running", index=True)
+    # running | success | failed | cancelled
+
+    mode        = Column(String(10))     # 'quick' | 'full'
+    params_json = Column(Text)           # start date, sweep flag, ticker override
+
+    current_step = Column(String(60))    # human label of the step in flight
+    step_index   = Column(Integer, default=0)
+    total_steps  = Column(Integer, default=0)
+    steps_json   = Column(Text)          # per-step status/timing/exit code/output tail
+
+    started_at   = Column(String(30), nullable=False, default=_now)
+    heartbeat_at = Column(String(30), nullable=False, default=_now)
+    finished_at  = Column(String(30))
+
+    pid      = Column(Integer)
+    log_path = Column(Text)
+
+    backtest_run_id = Column(Integer)    # ins_backtest_runs.id produced by this pipeline
+    error_message   = Column(Text)
+
+
 class InsiderScanRun(Base):
     """Live scanner run log — mirrors us52wh_scan_runs so stale data is detectable."""
     __tablename__ = "ins_scan_runs"

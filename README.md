@@ -125,11 +125,42 @@ Form 4 (EDGAR)  →  noise filter  →  conviction score  →  technical trigger
 
 ### Running it
 
-Order matters — the data layer must exist before anything downstream means anything.
+**One click:** dashboard → **Setup & Admin → Step 8 → "Start Insider Pipeline
+(runs in background)"**. That runs universe → ingest → score → backtest in order.
+
+The job is launched **detached** from Streamlit, so it survives the browser tab
+closing, the session expiring, and your machine sleeping or locking — it only needs
+the VPS to stay on. Progress is written to the `ins_pipeline_runs` table, so you can
+come back in ten minutes or a day later, hit **Refresh pipeline status**, and see
+exactly where it got to: current step, elapsed time, per-step timings, and the live
+log tail.
+
+Terminal states are unambiguous:
+
+| Status | What it means |
+|---|---|
+| ⏳ Running | Step *n* of *N*, with a heartbeat updated every 30s |
+| ✅ Completed successfully | Finished; open the Insider Swing tab for the verdict |
+| ❌ Failed | Which step failed, its exit code, and its output tail |
+| ❌ Stalled | Heartbeat older than 5 min — the process died (container restart / OOM), not slow. One button clears it so you can restart. |
+
+Nothing is lost on a stall: every fetched EDGAR document is cached on disk and the DB
+uniqueness constraints make re-runs idempotent, so restarting resumes roughly where it
+stopped.
+
+**Equivalent CLI**, if you prefer a shell:
 
 ```bash
 # 0. one-time: set INSIDER_SEC_USER_AGENT in .env (SEC blocks anonymous requests)
 
+# Same thing the button does — detached, returns immediately:
+docker compose exec -d dashboard python InsiderSwing/pipeline.py --start 2016-01-01
+
+# Or in the foreground:
+python InsiderSwing/pipeline.py --start 2016-01-01
+python InsiderSwing/pipeline.py --start 2022-01-01 --quick --sweep   # 12-ticker smoke run
+
+# Individual stages, if only one needs re-running:
 python InsiderSwing/run_insider.py --checkpoint universe
 python InsiderSwing/run_insider.py --checkpoint ingest --start 2014-01-01
 python InsiderSwing/run_insider.py --checkpoint score

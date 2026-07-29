@@ -58,7 +58,16 @@ out of context.
    ≤10 req/s rate limit. Anonymous requests get blocked.
 
 ### Build order (each step needs the previous one)
+Normally driven by **Setup & Admin → Step 8**, which launches
+`InsiderSwing/pipeline.py` **detached** so it survives the browser tab closing,
+the Streamlit session expiring, and the client machine sleeping. Progress lives in
+`ins_pipeline_runs` (heartbeat every 30s); the tab reads it whenever the user returns.
+
 ```powershell
+python InsiderSwing\pipeline.py --start 2016-01-01           # all stages
+python InsiderSwing\pipeline.py --start 2022-01-01 --quick   # 12-ticker smoke run
+
+# or one stage at a time
 python InsiderSwing\run_insider.py --checkpoint universe
 python InsiderSwing\run_insider.py --checkpoint ingest --start 2014-01-01
 python InsiderSwing\run_insider.py --checkpoint score
@@ -66,6 +75,11 @@ python InsiderSwing\run_insider.py --checkpoint backtest
 python InsiderSwing\run_insider.py --checkpoint sweep
 python -m pytest InsiderSwing\tests\ -q
 ```
+
+**Do not make Step 8 blocking again.** The whole point is that the EDGAR backfill
+takes hours; a Streamlit callback ties it to the browser session. A `running` row
+with a stale heartbeat means the process died, not that it is slow — that
+distinction is the only reason the heartbeat exists.
 Ingest from **~2 years before** the backtest start — the relative-size score compares
 each buy against that insider's own trailing 2-year average.
 

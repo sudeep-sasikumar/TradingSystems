@@ -10,10 +10,12 @@ Step 8 (Insider Swing) is deliberately separate from "Run Everything": its EDGAR
 backfill alone takes longer than every other step combined, and bundling it would
 turn a 2-hour setup into an overnight one with no way to tell what is still running.
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
@@ -32,17 +34,19 @@ _RUN_SP500_SCAN = str(_ROOT / "SP500" / "scanner" / "scanner.py")
 _RUN_INSIDER    = str(_ROOT / "InsiderSwing" / "run_insider.py")
 
 
-def _insider_counts() -> dict:
+def _load_insider_module(name: str):
     """
-    Row counts from the InsiderSwing DB (a SEPARATE SQLite file from trading.db).
+    Import an InsiderSwing module by explicit file path.
 
-    Imported lazily and by explicit file path: InsiderSwing/ uses flat absolute
-    imports and contains db.py / models.py / universe.py, which would shadow the
-    dashboard's own modules if the package directory went on sys.path here.
-    Returns zeros rather than raising when the module has not been built yet.
+    InsiderSwing/ uses flat absolute imports and contains db.py, models.py and
+    universe.py — names that would shadow the dashboard's own modules if the
+    package directory went on sys.path here. So we load by path and restore
+    sys.path afterwards. Returns None when the module is unavailable, so the
+    Setup tab degrades to a message rather than an exception.
     """
-    empty = {"filings": 0, "transactions": 0, "buys": 0, "scores": 0,
-             "signals": 0, "trades": 0, "runs": 0, "last_filing": None, "available": False}
+    key = f"insiderswing_{name}"
+    if key in sys.modules:
+        return sys.modules[key]
     try:
         import importlib.util
 
@@ -52,21 +56,36 @@ def _insider_counts() -> dict:
                 if p not in sys.path:
                     sys.path.append(p)
             spec = importlib.util.spec_from_file_location(
-                "insiderswing_db_status", _ROOT / "InsiderSwing" / "db.py"
+                key, _ROOT / "InsiderSwing" / f"{name}.py"
             )
             mod = importlib.util.module_from_spec(spec)
-            sys.modules["insiderswing_db_status"] = mod
+            sys.modules[key] = mod
             spec.loader.exec_module(mod)
+            return mod
         finally:
             sys.path[:] = saved
+    except Exception:
+        sys.modules.pop(key, None)
+        return None
 
-        def _one(sql: str):
-            try:
-                df = mod.read_sql(sql)
-                return df.iloc[0, 0] if not df.empty else 0
-            except Exception:
-                return 0
 
+def _insider_counts() -> dict:
+    """Row counts from the InsiderSwing DB (a SEPARATE SQLite file from trading.db)."""
+    empty = {"filings": 0, "transactions": 0, "buys": 0, "scores": 0,
+             "signals": 0, "trades": 0, "runs": 0, "last_filing": None, "available": False}
+
+    mod = _load_insider_module("db")
+    if mod is None:
+        return empty
+
+    def _one(sql: str):
+        try:
+            df = mod.read_sql(sql)
+            return df.iloc[0, 0] if not df.empty else 0
+        except Exception:
+            return 0
+
+    try:
         return {
             "filings": int(_one("SELECT COUNT(*) FROM ins_filings") or 0),
             "transactions": int(_one("SELECT COUNT(*) FROM ins_transactions") or 0),
@@ -82,8 +101,6 @@ def _insider_counts() -> dict:
     except Exception:
         return empty
 
-
-# ── Public entry point ─────────────────────────────────────────────────────────
 
 def render_tab() -> None:
     st.header("Setup & Admin")
@@ -379,168 +396,212 @@ def render_tab() -> None:
     _advanced_section()
 
 
-# ── Step 8 — Insider Swing pipeline ────────────────────────────────────────────
+# ── Step 8 — Insider Swing pipeline (runs in the background) ───────────────────
 
 def _insider_section() -> None:
     """
-    One button that runs the entire insider-cluster pipeline end to end.
+    One button, one background job.
+
+    The pipeline is launched DETACHED from Streamlit, so it survives the browser
+    tab closing, the session expiring, and the laptop sleeping — it only needs
+    the VPS to stay on. Progress lives in the ins_pipeline_runs table, so coming
+    back hours or a day later and hitting refresh shows exactly where it got to.
 
     Deliberately NOT folded into "Run Everything": the EDGAR backfill alone is
-    longer than every other step in this tab combined, and bundling it would
-    turn a 2-hour setup into an overnight one with no way to tell which part is
-    still running.
+    longer than every other step in this tab combined.
     """
-    st.subheader("Step 8 — Insider-Trade Cluster Swing (full pipeline)")
+    st.subheader("Step 8 — Insider-Trade Cluster Swing (background pipeline)")
     st.markdown(
         "Runs the whole insider system in order: **universe → ingest → score → backtest** "
-        "(optionally the parameter-stability sweep too). Populates the **Insider Swing** tab.  \n"
+        "(optionally the parameter sweep). Populates the **Insider Swing** tab.  \n"
         "**strategy\\_version:** `insider_v1` &nbsp;|&nbsp; "
         "**DB:** `data/insider_swing.db` (separate from `trading.db`)"
     )
 
-    ins = _insider_counts()
+    pl = _load_insider_module("pipeline")
+    if pl is None:
+        st.error(
+            "The InsiderSwing module could not be loaded. Check that `InsiderSwing/` exists "
+            "in the image and that `pip install -r requirements.txt` has run."
+        )
+        return
 
-    # Two hard prerequisites, checked up front rather than failing 40 minutes in.
-    engine = get_engine()
+    run = pl.latest_run()
+    active = bool(run and run["status"] == "running" and not run["stale"])
+
+    _insider_status_panel(pl, run)
+    st.markdown("---")
+    _insider_launch_controls(pl, active)
+
+
+def _insider_status_panel(pl, run: dict | None) -> None:
+    """Everything the user needs when they come back later, at the top."""
+    st.markdown("#### Pipeline status")
+
+    if st.button("🔄  Refresh pipeline status", key="btn_ins_refresh"):
+        st.rerun()
+
+    if run is None:
+        st.info("**Never run.** Configure and start it below — it runs in the background, "
+                "so you can close this tab and come back whenever.")
+        return
+
+    status = run["status"]
+    started = run.get("started_at")
+    steps = run.get("steps") or []
+    mode = "quick test (12 tickers)" if run.get("mode") == "quick" else "full universe"
+
+    # ── still running ─────────────────────────────────────────────────────────
+    if status == "running" and not run["stale"]:
+        done = max(int(run.get("step_index") or 1) - 1, 0)
+        total = int(run.get("total_steps") or 1)
+        st.info(
+            f"### ⏳ Running — step {run.get('step_index')} of {total}\n"
+            f"**{run.get('current_step')}**\n\n"
+            f"Started {pl.fmt_duration(pl.elapsed_seconds(started))} ago · {mode} · "
+            f"last heartbeat {pl.fmt_duration(pl.heartbeat_age_seconds(run.get('heartbeat_at')))} ago"
+        )
+        st.progress(min(done / total, 1.0) if total else 0.0)
+        st.caption(
+            "This is a detached background process. **You can close this tab, lock the "
+            "machine, or come back tomorrow** — it keeps running on the VPS. Hit "
+            "*Refresh pipeline status* whenever you want to check in."
+        )
+
+    # ── died mid-run ──────────────────────────────────────────────────────────
+    elif status == "running" and run["stale"]:
+        st.error(
+            f"### ❌ Stalled — no heartbeat for "
+            f"{pl.fmt_duration(pl.heartbeat_age_seconds(run.get('heartbeat_at')))}\n"
+            f"The process was on **{run.get('current_step')}** and appears to have died — "
+            "usually a container restart or the host running out of memory, not a bug in "
+            "the pipeline.\n\n"
+            "Nothing is lost: every fetched EDGAR document is cached on disk and the "
+            "database constraints make re-runs idempotent, so starting again resumes "
+            "roughly where this left off."
+        )
+        if st.button("Clear stalled run and allow a restart", key="btn_ins_clear"):
+            pl.cancel_stalled()
+            st.rerun()
+
+    # ── finished ──────────────────────────────────────────────────────────────
+    elif status == "success":
+        st.success(
+            f"### ✅ Completed successfully\n"
+            f"Finished **{run.get('finished_at', '')[:19].replace('T', ' ')} UTC** "
+            f"after {pl.fmt_duration(pl.elapsed_seconds(started, run.get('finished_at')))} "
+            f"({mode}).\n\n"
+            "Open the **Insider Swing** tab — the verdict is at the top of the Backtest "
+            "sub-tab. A flat or negative result there is a real finding, not a failed run."
+        )
+    elif status == "failed":
+        st.error(
+            f"### ❌ Failed\n"
+            f"{run.get('error_message') or 'Unknown error.'}\n\n"
+            f"Ran for {pl.fmt_duration(pl.elapsed_seconds(started, run.get('finished_at')))} "
+            f"before stopping."
+        )
+    elif status == "cancelled":
+        st.warning(f"### ⚠️ Cancelled\n{run.get('error_message') or ''}")
+
+    # ── per-step detail ───────────────────────────────────────────────────────
+    if steps:
+        icons = {"success": "✅", "failed": "❌", "running": "⏳"}
+        rows = []
+        for s in steps:
+            rows.append({
+                "": icons.get(s.get("status"), "•"),
+                "step": s.get("name"),
+                "status": s.get("status"),
+                "duration": pl.fmt_duration(
+                    pl.elapsed_seconds(s.get("started_at"), s.get("finished_at"))
+                ),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        failed = [s for s in steps if s.get("status") == "failed"]
+        if failed and failed[-1].get("tail"):
+            with st.expander("Output from the failed step", expanded=True):
+                st.code(failed[-1]["tail"])
+
+    tail = pl.tail_log(run, lines=40)
+    if tail:
+        with st.expander("Live log tail"):
+            st.code(tail)
+        if run.get("log_path"):
+            st.caption(f"Full log: `{run['log_path']}`")
+
+
+def _insider_launch_controls(pl, active: bool) -> None:
+    """Prerequisite checks, options, and the start button."""
+    st.markdown("#### Start a run")
+
+    # Two hard prerequisites, checked up front rather than failing hours in.
     try:
-        with engine.connect() as conn:
+        with get_engine().connect() as conn:
             n_members = int(conn.execute(text("SELECT COUNT(*) FROM sp500_membership")).scalar() or 0)
     except Exception:
         n_members = 0
 
-    import os
     ua = os.getenv("INSIDER_SEC_USER_AGENT", "")
     ua_ok = bool(ua) and "@" in ua and "example.com" not in ua
 
     if n_members < 400:
         st.error(
             "**Blocked — run Step 4 first.** The insider universe is built from the "
-            "point-in-time `sp500_membership` table (so delisted names are included and the "
-            "backtest isn't survivorship-biased). That table is empty or incomplete."
+            "point-in-time `sp500_membership` table, so delisted names are included and the "
+            "backtest isn't survivorship-biased. That table is empty or incomplete."
         )
     if not ua_ok:
         st.error(
             "**Blocked — set `INSIDER_SEC_USER_AGENT` in `.env`.** The SEC requires a "
-            "descriptive User-Agent containing a real contact address on every request "
-            "(e.g. `Sudeep Sasikumar TradingSystems (you@example.org)`). Anonymous or "
-            "placeholder requests are throttled and then blocked outright.  \n"
-            "After editing `.env`: `docker compose up -d` to pick it up."
+            "descriptive User-Agent with a real contact address on every request "
+            "(e.g. `Sudeep Sasikumar TradingSystems (you@yourdomain.com)`). Anonymous or "
+            "placeholder requests get throttled, then blocked.  \n"
+            "After editing `.env`, run `docker compose up -d` to pick it up."
         )
 
     c1, c2, c3 = st.columns([1, 1, 2])
-    start_date = c1.text_input("Ingest / backtest start", value="2016-01-01",
-                               key="ins_start",
-                               help="Ingest reaches back 2 extra years automatically — the "
-                                    "relative-size score compares each buy to that insider's "
-                                    "own trailing 2-year average.")
-    quick = c2.checkbox("Quick test (12 tickers)", value=False, key="ins_quick",
-                        help="Runs the whole pipeline on a small ticker set in ~10 min so you "
-                             "can verify the plumbing before committing to the full backfill.")
-    run_sweep = c3.checkbox("Also run the parameter-stability sweep", value=False,
-                            key="ins_sweep",
-                            help="80 full simulations. Adds 10-40 min on the full universe. "
-                                 "Answers whether performance is a plateau or an overfit spike.")
+    start_date = c1.text_input("Backtest start", value="2016-01-01", key="ins_start",
+                               help="Ingest automatically reaches back 2 extra years — the "
+                                    "relative-size score compares each buy against that "
+                                    "insider's own trailing 2-year average.")
+    quick = c2.checkbox("Quick test", value=False, key="ins_quick",
+                        help="12 tickers, ~10 min. Verifies EDGAR access, the SEC "
+                             "User-Agent and the report pipeline before you commit to the "
+                             "full backfill.")
+    sweep = c3.checkbox("Also run the parameter-stability sweep", value=False, key="ins_sweep",
+                        help="80 full simulations. Adds 10-40 min. Answers whether "
+                             "performance is a robust plateau or an overfit spike.")
 
     if quick:
-        st.info(
-            "**Quick test mode** — 12 liquid large caps, not a real result. Use it to confirm "
-            "EDGAR access, the SEC User-Agent, and the report pipeline all work. Any backtest "
-            "number it produces will be flagged as a thin sample, correctly."
-        )
+        st.info("**Quick test** — 12 liquid large caps. Not a real result; any backtest "
+                "number it produces will be flagged as a thin sample, correctly.")
     else:
-        st.warning(
-            "**Full run: 3–8 hours**, dominated by the first EDGAR backfill "
+        st.caption(
+            "**Full run takes 3–8 hours**, almost all of it the first EDGAR backfill "
             "(~600 issuers × 10 years of Form 4 documents at the SEC's 8 req/s ceiling). "
-            "Every document is cached to disk gzipped and the DB constraints make re-runs "
-            "idempotent, so this is **resumable** — if it dies, click again and it picks up "
-            "where it left off.  \n"
-            "For an unattended first run, prefer SSH + the CLI command in the Advanced "
-            "section: a browser tab held open for 6 hours is the fragile part, not the job."
+            "It runs detached in the background, so closing this tab is fine. Every "
+            "document is cached to disk and re-runs are idempotent, so it is resumable."
         )
 
-    tickers_arg = ["--tickers", "INTC,F,KMI,OXY,T,PARA,WBA,MRNA,DVN,APA,HAL,NEM"] if quick else []
-    ingest_start = _shift_year(start_date, -2)
+    if active:
+        st.button("▶  Start Insider Pipeline", key="btn_insider", type="primary", disabled=True)
+        st.caption("A run is already in progress — see the status above.")
+        return
 
     disabled = (n_members < 400) or (not ua_ok)
-    if st.button("▶  Run Full Insider Pipeline", key="btn_insider", type="primary",
-                 disabled=disabled):
-        st.markdown("**8a — Universe & CIK resolution**")
-        ok = _run_step(
-            label="Insider universe + SEC CIK map",
-            cmd=[_PY, _RUN_INSIDER, "--checkpoint", "universe", "--start", start_date],
-            timeout=900,
-        )
-
-        if ok:
-            st.markdown(f"**8b — Ingest Form 4 filings from {ingest_start}** "
-                        "(the long one — resumable, disk-cached)")
-            ok = _run_step(
-                label=f"EDGAR Form 4 ingest ({ingest_start} → today)",
-                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "ingest",
-                     "--start", ingest_start] + tickers_arg,
-                timeout=28800,      # 8h — the backfill is genuinely this long
-            )
-
-        if ok:
-            st.markdown("**8c — Conviction scoring**")
-            ok = _run_step(
-                label="Conviction scores (0-100, with audit breakdown)",
-                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "score",
-                     "--start", start_date] + tickers_arg,
-                timeout=3600,
-            )
-
-        if ok:
-            st.markdown("**8d — Three-arm backtest + saved report**")
-            ok = _run_step(
-                label="Backtest (insider_only / tech_only / combined)",
-                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "backtest",
-                     "--start", start_date, "--label", "vps_baseline"] + tickers_arg,
-                timeout=14400,
-            )
-
-        if ok and run_sweep:
-            st.markdown("**8e — Parameter stability sweep**")
-            _run_step(
-                label="Parameter sweep (80 cells)",
-                cmd=[_PY, _RUN_INSIDER, "--checkpoint", "sweep",
-                     "--start", start_date, "--label", "vps"] + tickers_arg,
-                timeout=14400,
-            )
-
-        if ok:
+    if st.button("▶  Start Insider Pipeline (runs in background)", key="btn_insider",
+                 type="primary", disabled=disabled):
+        result = pl.launch_detached(start=start_date.strip(), quick=quick, sweep=sweep)
+        if result.get("ok"):
             st.success(
-                "Insider pipeline complete — open the **Insider Swing** tab. The verdict is "
-                "printed at the top of the Backtest sub-tab and in the saved report under "
-                "`data/reports/insider/`. A flat or negative result there is a real finding, "
-                "not a failed run."
+                f"Started in the background (pid {result['pid']}). You can close this tab now — "
+                "come back any time and hit **Refresh pipeline status**."
             )
+            st.rerun()
         else:
-            st.error("Pipeline stopped at the failed step above — later steps were skipped "
-                     "because each one depends on the previous one's output.")
-
-    # Current state
-    if ins["available"] and ins["filings"]:
-        st.markdown("**Current insider data**")
-        i1, i2, i3, i4, i5 = st.columns(5)
-        i1.metric("Form 4 filings", f"{ins['filings']:,}")
-        i2.metric("Open-market buys", f"{ins['buys']:,}",
-                  help=f"of {ins['transactions']:,} transaction lines — the rest are awards, "
-                       "vesting, exercises and gifts, which carry no conviction information")
-        i3.metric("Scores", f"{ins['scores']:,}")
-        i4.metric("Signals", f"{ins['signals']:,}")
-        i5.metric("Backtest runs", f"{ins['runs']:,}")
-        if ins["last_filing"]:
-            st.caption(f"Newest stored filing date: **{ins['last_filing']}**")
-
-
-def _shift_year(date_str: str, delta: int) -> str:
-    """Shift a YYYY-MM-DD string by whole years; returns the input on bad format."""
-    try:
-        y, m, d = (int(x) for x in str(date_str).strip().split("-"))
-        return f"{y + delta:04d}-{m:02d}-{d:02d}"
-    except Exception:
-        return date_str
+            st.error(f"Could not start: {result.get('reason')}")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -761,20 +822,34 @@ docker compose exec dashboard python SP500/run_sp500_backtest.py --checkpoint fr
 # Optional: S&P 500 scanner test run (after US market close)
 docker compose exec sp500_scanner python SP500/scanner/scanner.py --run-now
 
-# Step 8: Insider Swing full pipeline (3-8 h, dominated by the EDGAR backfill)
-# PREFER THIS OVER THE BUTTON for the first full run — a browser tab held open
-# for six hours is the fragile part, not the job. Every fetched document is
-# cached to disk and the DB constraints make re-runs idempotent, so it resumes.
+# Step 8: Insider Swing (3-8 h, dominated by the EDGAR backfill)
+# The Step 8 BUTTON already runs this detached in the background, so it survives
+# the browser closing, the session expiring and the machine sleeping. These are
+# only for driving it from a shell instead.
+
+# Same thing the button does (detached; returns immediately):
+docker compose exec -d dashboard python InsiderSwing/pipeline.py --start 2016-01-01
+
+# Foreground, if you want to watch it:
+docker compose exec dashboard python InsiderSwing/pipeline.py --start 2016-01-01
+docker compose exec dashboard python InsiderSwing/pipeline.py --start 2022-01-01 --quick --sweep
+
+# Individual stages, if a single one needs re-running:
 docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint universe
 docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint ingest --start 2014-01-01
 docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint score --start 2016-01-01
 docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint backtest --start 2016-01-01 --label vps_baseline
 docker compose exec dashboard python InsiderSwing/run_insider.py --checkpoint sweep --start 2016-01-01
 
-# Survive an SSH disconnect during the multi-hour backfill:
-docker compose exec -d dashboard python InsiderSwing/run_insider.py --checkpoint ingest --start 2014-01-01
-docker compose logs -f dashboard
+# Watch a background run from the shell:
+docker compose exec dashboard sh -c 'tail -f data/reports/insider/pipeline_*.log'
 ```
+
+**Note on restarts:** the pipeline runs inside the `dashboard` container. A
+`docker compose up -d --build` mid-run kills it — the Setup tab will then show
+"Stalled, no heartbeat". Nothing is lost: EDGAR documents are cached on disk and
+re-runs are idempotent, so clearing the stalled run and starting again resumes
+roughly where it stopped.
 
 **Insider Swing prerequisites (both are enforced by the Step 8 button):**
 ```bash

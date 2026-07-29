@@ -759,6 +759,27 @@ That 3.4% is the whole case for the noise filter.
 Result was correctly reported as **thin-sample, no distinguishable edge** — the
 verdict logic works on a negative result, which is what it was built for.
 
+**Setup & Admin Step 8 — one-click background pipeline**:
+`InsiderSwing/pipeline.py` runs universe → ingest → score → backtest (→ sweep),
+launched **detached** from Streamlit (POSIX `start_new_session`, Windows
+`DETACHED_PROCESS`). It survives the browser tab closing, the session expiring, and
+the client machine sleeping — only the VPS needs to stay on.
+
+Progress is tracked in the new `ins_pipeline_runs` table, with a 30s heartbeat from a
+daemon thread. Without the heartbeat, a row stuck on `running` during a 4-hour ingest
+is indistinguishable from a process that was OOM-killed an hour ago. The Setup tab
+shows: ⏳ running (step n/N, elapsed, per-step timings, live log tail), ✅ completed
+successfully, ❌ failed (which step, exit code, output tail), or ❌ stalled (heartbeat
+> 5 min) with a one-click clear.
+
+`reap_stale_runs()` sweeps ALL stale `running` rows, not just the newest — a
+latest-row-only version leaves a dead predecessor marked running forever once a
+second run starts. It runs automatically when a new pipeline starts.
+
+Verified: detached launch returns pid + run_id; concurrency guard blocks a second
+launch (button and CLI, `--force` to override); step progression, heartbeat, and all
+four terminal states render correctly.
+
 **Not yet done**: the full-universe multi-year EDGAR backfill (hours, resumable,
 disk-cached). Until that runs, no conclusion about the strategy is available.
 
