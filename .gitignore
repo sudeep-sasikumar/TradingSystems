@@ -5,7 +5,12 @@
 
 # Data — local only, not committed
 data/trading.db
+data/sp500_us_breakout.db
+data/insider_swing.db
+data/insider_swing.db-wal
+data/insider_swing.db-shm
 data/cache/
+data/reports/
 
 # Python
 __pycache__/

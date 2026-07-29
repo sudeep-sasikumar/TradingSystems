@@ -188,7 +188,7 @@ def checkpoint_backtest(force_refresh: bool = False) -> None:
     print(f"  Results saved to: {_ROOT / 'data' / 'trading.db'}")
     print(f"  strategy_version: {STRATEGY_VERSION}")
     print(_DIV)
-    print(f"\n  ⚠  IMPORTANT CAVEATS:")
+    print(f"\n  [!] IMPORTANT CAVEATS:")
     print(f"  1. Survivorship bias: current Nifty 500 list only.")
     print(f"  2. Adjusted prices used (splits/dividends corrected).")
     print(f"  3. No transaction costs, slippage, or taxes modelled.")
